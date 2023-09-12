@@ -1,138 +1,117 @@
+# Modified file of 01_import.R.
+# Introduce the following changes:
+# - set checkpoints to free up memory 
+# - cast binary variables (tetanus_status, fup) to boolean datatype
+# - cast gender to factor datatype
+# - change "Khong ro" in vacplace to NA for a clearer representation
 
-# load R packages ---------------------------------------------------------
-
-library(readxl)
-library(data.table)
-library(lubridate)
-library(stringi)
+# ---- Import libraries ------
 library(arrow)
-library(tidyverse)
+library(readxl)
+library(lubridate)
+library(data.table)
+library(stringi)
+library(sparklyr)
 
-## input
-data_path <- file.path("/", "cluster_data", "vaccine_registry")
-
+# ------ Paths ------
+# data path
+data_path <- file.path("/.", "cluster_data", "vaccine_registry")
 ## output
-save_path <- file.path("/", "cluster_data", "vrdata", "raw")
-
-
-# import and combine files ------------------------------------------------
-
-## list all files
+save_path <- file.path("/.", "cluster_data", "vrdata", "raw")
+## get all files 
 files <- list.files(path = data_path, recursive = TRUE)
 
-## import and combine files
-dat <- NULL
-for (i in c(1:161)) {
-  cat(i, "\n")
+# ------- Read files ----- 
+data <- NULL
+# chekpoints to save files, free up memories
+checkpoints = c(58, 121, 184, length(files))
 
-  ## read from excel
-  dati <- as.data.table(read_excel(path = file.path(data_path, files[i]), sheet = 1))
-
-  if (nrow(dati) > 0) {
+for (i in c(1:length(files))){
+  ## reading data from excel 
+  data_i <- as.data.table(read_excel(path = file.path(data_path, files[i]), sheet = 1))
+  
+  if (nrow(data_i) > 0) {
     ## rename
-    setnames(x = dati,
-             old = c("MA_DOI_TUONG", "HO_TEN", "GIOI_TINH", "TO_CHAR(D.NGAY_SINH,'DD/MM/YYYY')", "TEN_DAN_TOC", "TINH_TRANG_THEO_DOI", "TEN_TINH", "TEN_HUYEN", "TEN_XA", "TEN_TINH_DANG_KY", "TEN_HUYEN_DANG_KY", "TEN_XA_DANG_KY", "SO_MUI_UVSS_ME_TIEM", "TINH_TRANG_BV_UVSS", "NGUOI_CHAM_SOC", "TO_CHAR(D.NGAY_TAO,'DD/MM/YYYY')", "TEN_VACXIN", "THU_TU_MUI_TIEM", "TO_CHAR(LST.NGAY_TIEM,'DD/MM/YYYY')", "NOI_TIEM", "HINH_THUC_TIEM_CHUNG", "LOAI_CO_SO_TIEM", "COSO_TIEM", "TO_CHAR(LST.NGAY_TAO,'DD/MM/YYYY')", "CO_SO_CAP_NHAT", "RN"),
-             new = c("pid", "name", "sex", "dob", "ethnic", "fup", "province", "district", "commune", "province_reg", "district_reg", "commune_reg", "tetanus_mom", "tetanus_status", "caregiver", "date0", "vacname", "vacorder", "vacdate", "vacplace0", "vactype", "vacplace_type", "vacplace", "date1", "place_update", "rn"))
+    setnames(x = data_i,
+             old = c("MA_DOI_TUONG", "HO_TEN", "GIOI_TINH", "TO_CHAR(D.NGAY_SINH,'DD/MM/YYYY')", 
+                     "TEN_DAN_TOC", "TINH_TRANG_THEO_DOI", "TEN_TINH", "TEN_HUYEN", "TEN_XA", 
+                     "TEN_TINH_DANG_KY", "TEN_HUYEN_DANG_KY", "TEN_XA_DANG_KY", "SO_MUI_UVSS_ME_TIEM", 
+                     "TINH_TRANG_BV_UVSS", "NGUOI_CHAM_SOC", "TO_CHAR(D.NGAY_TAO,'DD/MM/YYYY')", 
+                     "TEN_VACXIN", "THU_TU_MUI_TIEM", "TO_CHAR(LST.NGAY_TIEM,'DD/MM/YYYY')", 
+                     "NOI_TIEM", "HINH_THUC_TIEM_CHUNG", "LOAI_CO_SO_TIEM", "COSO_TIEM", 
+                     "TO_CHAR(LST.NGAY_TAO,'DD/MM/YYYY')", "CO_SO_CAP_NHAT", "RN"),
+             new = c("pid", "name", "sex", "dob", "ethnic", "fup", 
+                     "province", "district", "commune", "province_reg", 
+                     "district_reg", "commune_reg", "tetanus_mom", "tetanus_status", 
+                     "caregiver", "date0", "vacname", "vacorder", "vacdate", "vacplace0", 
+                     "vactype", "vacplace_type", "vacplace", "date1", "place_update", "rn"))
 
-    ## remove accent
-    dati$province2 <- stri_trans_general(dati$province, "Latin-ASCII")
-    dati$district2 <- stri_trans_general(dati$district, "Latin-ASCII")
-    dati$commune2 <- stri_trans_general(dati$commune, "Latin-ASCII")
-    dati$vacname2 <- stri_trans_general(dati$vacname, "Latin-ASCII")
-
+    # Create new column for register place, used as save path parquet
+    data_i$province_reg2 <- tolower(stri_trans_general(data_i$province_reg, "Latin-ASCII"))
+    data_i$province_reg2 <- gsub(" ", "_", data_i$province_reg2)
+    
     ### format date
-    dati$dob <- dmy(dati$dob)
-    dati$vacdate <- dmy(dati$vacdate)
-
+    data_i$dob <- dmy(data_i$dob)
+    data_i$vacdate <- dmy(data_i$vacdate)
+    
+    ## factorize gender
+    data_i$sex <- tolower(stri_trans_general(data_i$sex, "Latin-ASCII"))
+    data_i$sex <- factor(data_i$sex, levels=c("nam", "nu"))
+    
+    ## format binary data 
+    data_i$tetanus_status <- tolower(stri_trans_general(data_i$tetanus_status, "Latin-ASCII"))
+    data_i$tetanus_status[data_i$tetanus_status == "da duoc bao ve"] <- TRUE
+    data_i$tetanus_status[data_i$tetanus_status == "chua duoc bao ve"] <- FALSE
+    data_i$tetanus_status <- as.logical(data_i$tetanus_status)
+    
+    data_i$fup <- tolower(stri_trans_general(data_i$fup, "Latin-ASCII"))
+    data_i$fup[data_i$fup == "co"] <- TRUE
+    data_i$fup[data_i$fup == "khong"] <- FALSE
+    data_i$fup <- as.logical(data_i$fup)
+    
+    
+    ## handle unclear data (Khong ro -> NA)
+    data_i$vacplace_type <- stri_trans_general(data_i$vacplace_type, "Latin-ASCII")
+    data_i$vacplace_type[data_i$vacplace_type=="Khong ro"] <- NA
+    
     ## add source
-    dati$file = files[i]
-
-    ## combind
-    dat <- rbindlist(l = list(dat, dati))
+    data_i$file = files[i]
+    
+    if(is.null(data)){
+      data <- data_i
+    }else{
+      ## combine
+      data <- rbindlist(l = list(data, data_i))
+    }
   }
+  
+  # free up memory used for data at i 
+  rm(data_i)
+  #collect garbage
+  gc()
+  
+  # ---- Save data and free memories at checkpoints ----
+  if (i %in% checkpoints){
+    # ---- Drop redundant columns ----
+    data[ ,':='(date0 = NULL, date1 = NULL)] 
+    
+    # ---- Save as parquet file ---- 
+    write_dataset(
+      dataset = data,
+      path = file.path(save_path, "parquet"),
+      format = "parquet",
+      partitioning = list("province_reg2")
+    )
+    
+    # ----- Free up memory for loading and saving data ---- 
+    rm(data)
+    gc()
+    data <- NULL
+  }
+  
 }
 
-### save
-#fwrite(x = dat, file = file.path(save_path, "raw_001_161.csv"))
-#fwrite(x = dat, file = file.path("raw_001_161.csv"))
-saveRDS(dat, file = file.path("raw_001_161.rds"))
 
-dat <- NULL
-for (i in c(162:length(files))) {
-  cat(i, "\n")
 
-  ## read from excel
-  dati <- as.data.table(read_excel(path = file.path(data_path, files[i]), sheet = 1))
 
-  if (nrow(dati) > 0) {
-    ## rename
-    setnames(x = dati,
-             old = c("MA_DOI_TUONG", "HO_TEN", "GIOI_TINH", "TO_CHAR(D.NGAY_SINH,'DD/MM/YYYY')", "TEN_DAN_TOC", "TINH_TRANG_THEO_DOI", "TEN_TINH", "TEN_HUYEN", "TEN_XA", "TEN_TINH_DANG_KY", "TEN_HUYEN_DANG_KY", "TEN_XA_DANG_KY", "SO_MUI_UVSS_ME_TIEM", "TINH_TRANG_BV_UVSS", "NGUOI_CHAM_SOC", "TO_CHAR(D.NGAY_TAO,'DD/MM/YYYY')", "TEN_VACXIN", "THU_TU_MUI_TIEM", "TO_CHAR(LST.NGAY_TIEM,'DD/MM/YYYY')", "NOI_TIEM", "HINH_THUC_TIEM_CHUNG", "LOAI_CO_SO_TIEM", "COSO_TIEM", "TO_CHAR(LST.NGAY_TAO,'DD/MM/YYYY')", "CO_SO_CAP_NHAT", "RN"),
-             new = c("pid", "name", "sex", "dob", "ethnic", "fup", "province", "district", "commune", "province_reg", "district_reg", "commune_reg", "tetanus_mom", "tetanus_status", "caregiver", "date0", "vacname", "vacorder", "vacdate", "vacplace0", "vactype", "vacplace_type", "vacplace", "date1", "place_update", "rn"))
 
-    ## remove accent
-    dati$province2 <- stri_trans_general(dati$province, "Latin-ASCII")
-    dati$district2 <- stri_trans_general(dati$district, "Latin-ASCII")
-    dati$commune2 <- stri_trans_general(dati$commune, "Latin-ASCII")
-    dati$vacname2 <- stri_trans_general(dati$vacname, "Latin-ASCII")
-
-    ### format date
-    dati$dob <- dmy(dati$dob)
-    dati$vacdate <- dmy(dati$vacdate)
-
-    ## add source
-    dati$file = files[i]
-
-    ## combind
-    dat <- rbindlist(l = list(dat, dati))
-  }
-}
-
-### save
-#fwrite(x = dat, file = file.path(save_path, "alldat_162_207.csv"))
-#fwrite(x = dat, file = file.path("alldat_162_207.csv"))
-saveRDS(dat, file = file.path("raw_162_207.rds"))
-
-# save into parquet format ------------------------------------------------
-
-dat <- open_dataset(file.path(save_path), format = "csv",
-                    schema = schema("pid" = string(),
-                                    "name" = string(),
-                                    "sex" = string(),
-                                    "dob" = string(),
-                                    "ethnic" = string(),
-                                    "fup" = string(),
-                                    "province" = string(),
-                                    "district" = string(),
-                                    "commune" = string(),
-                                    "province_reg" = string(),
-                                    "district_reg" = string(),
-                                    "commune_reg" = string(),
-                                    "tetanus_mom" = string(),
-                                    "tetanus_status" = string(),
-                                    "caregiver" = string(),
-                                    "date0" = string(),
-                                    "vacname" = string(),
-                                    "vacorder" = string(),
-                                    "vacdate" = string(),
-                                    "vacplace0" = string(),
-                                    "vactype" = string(),
-                                    "vacplace_type" = string(),
-                                    "vacplace" = string(),
-                                    "date1" = string(),
-                                    "place_update" = string(),
-                                    "rn" = string(),
-                                    "province2" = string(),
-                                    "district2" = string(),
-                                    "commune2" = string(),
-                                    "vacname2" = string(),
-                                    "file" = string()
-                    )) %>%
-  select(-date0, -date1)
-
-write_dataset(
-  dataset = dat,
-  path = file.path(save_path, "parquet"),
-  format = "parquet",
-  partitioning = "province_reg"
-)
