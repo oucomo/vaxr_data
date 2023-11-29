@@ -1,0 +1,137 @@
+---
+title: "Load data for treatment regimen"
+output: html_notebook
+---
+
+## 1. Import libraries 
+
+```{r}
+library(sets)
+library(data.table)
+library(ArrowDQAToolkit)
+```
+
+## 2. Loading data set
+Set up path to load data
+
+```{r}
+# define paths
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "parquet")
+vaccine_folder <- file.path("/.", "cluster_data", "vrdata", "vaccine_data")
+
+vaccines <- file.path(vaccine_folder, "vaccines.xlsx")
+vacname <- file.path(vaccine_folder, "vacname.xlsx")
+treatmeant_regimen <- file.path(vaccine_folder, "treatment_regimen.xlsx")
+
+# read data
+raw_data <- open_dataset(data_path)
+vaccines_data <- as_arrow_table(read_excel(path = vaccines, sheet = 1))
+treatment_regimen_data <- as_arrow_table(read_excel(path = treatmeant_regimen, sheet = 1))
+vacname_data <- as.data.table(read_excel(path = vacname, sheet = 2))
+
+vacname_data
+```
+
+## 3. Overview of vaccine data 
+
+### Create mapping from vacname in registry to pathogen
+Create a table mapping vacname to its pathogen(s)
+
+Used for standardizing 
+```{r preprocess vacname data}
+# create new data table with vacname mapping to pathogen
+vacname_pathogen <- data.table(vacname=character(), pathogen=character())
+for (row in 1:nrow(vacname_data)){
+  if (!is.na(vacname_data[row, "note"])){
+    if (vacname_data[row, "note"] == "SERUM" || vacname_data[row, "note"] == "NOT VACCINE"){
+      # annotate vacnames that are SERUM or NOT VACCINE
+      vacname_pathogen <- rbind(vacname_pathogen, list(vacname_data[[row, "vacc_name"]], vacname_data[[row, "note"]]))
+      next
+    }
+  }
+  
+  # get pathogen(s) (name of column where value == 1)
+  pathogen_indices <- which(vacname_data[row] == 1)
+  pathogens <- colnames(vacname_data)[pathogen_indices]
+  
+   # append vacname and corresponding pathogen
+  for (pathogen in pathogens){
+    vacname_pathogen <- rbind(vacname_pathogen, list(vacname_data[[row, "vacc_name"]], pathogen))
+  }
+}
+vacname_pathogen
+# save R object for reuse while cleaning data
+saveRDS(vacname_pathogen, file.path(vaccine_folder, "vacname_pathogen.rds"))
+```
+
+### Create labels for pathogens
+```{r generate pathogens label}
+pathogen_data <- as.data.table(read_excel(path = vacname, sheet = 1))
+pathogen_data[1,-c("vacc_name", "ref")]
+```
+### Create mapping from vacname in registry to standardized vaccine name
+```{r generate standardized vacname mapping}
+vacname_standardized <- vacname_data %>% 
+  select(vacc_name, standard_name, note) %>% 
+  mutate(standard_name = ifelse(is.na(note), standard_name, note)) %>% 
+  select(-note) 
+
+saveRDS(vacname_standardized, file.path(vaccine_folder, "vacname_standardized.rds"))
+```
+
+### Create mapping from standardized vacname to pathogens
+```{r}
+vacname_standardized %>%
+  full_join(vacname_pathogen, by = join_by(vacc_name == vacname)) 
+
+```
+
+
+### 3.1. Vaccines in vacname.xlsx vs in raw_data
+
+```{r Vaccines in vacname vs raw_data}
+vacname_pathogen <- readRDS(file.path(vaccine_folder, "vacname_pathogen.rds"))
+# convert to arrow table before joining
+vacname_pathogen <- as_arrow_table(vacname_pathogen)
+
+vacname_pathogen %>% collect()
+
+raw_data %>% 
+  # standardize spacing before joining
+  mutate(vacname = str_replace_all(vacname, "[[:space:]]+", " ")) %>%
+  left_join(vacname_pathogen, by=join_by(vacname == vacname)) %>% # try joining raw_data to pathogen
+  dplyr::filter(pathogen != "SERUM", pathogen != "NOT VACCINE") %>%
+  compute()
+```
+Observations:
+- Some vacname are labeled as NOT_VACCINE in the vaccines dataset (27,568 rows with such vacname)
+- Some vacname are labeled as SERUM in the vaccines dataset (98,652 rows with such vacame)
+
+```{r count for each pathogen}
+pathogen_count <- raw_data %>% 
+  # standardize spacing before joining
+  mutate(vacname = str_replace_all(vacname, "[[:space:]]+", " ")) %>%
+  left_join(vacname_pathogen, by=join_by(vacname == vacname)) %>% # try joining raw_data to pathogen
+  dplyr::filter(pathogen != "SERUM", pathogen != "NOT VACCINE") %>%
+  select(pathogen) %>% 
+  group_by(pathogen) %>% 
+  count(sort = TRUE) %>% 
+  collect()
+
+options(bitmapType='cairo')
+raw_data %>% 
+  # standardize spacing before joining
+  mutate(vacname = str_replace_all(vacname, "[[:space:]]+", " ")) %>%
+  left_join(vacname_pathogen, by=join_by(vacname == vacname)) %>% # try joining raw_data to pathogen
+  dplyr::filter(pathogen != "SERUM", pathogen != "NOT VACCINE") %>%
+  select(pathogen) %>% 
+  group_by(pathogen) %>%
+  collect() %>% 
+  ggplot(aes(x=pathogen)) + 
+  geom_bar()
+```
+
+
+
+
+

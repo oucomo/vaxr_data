@@ -1,0 +1,3 @@
+4_clean_data/checkpoints
+4_clean_data/spark-warehouse
+4_clean_data/original_names.parquet

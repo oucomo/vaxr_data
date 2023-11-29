@@ -1,0 +1,308 @@
+---
+title: "Data Overview - Univariate"
+output:
+  html_document:
+    df_print: paged
+---
+
+## 1. Import relevant libraries
+
+```{r}
+library(ArrowDQAToolkit)
+source("helpers.R")
+```
+
+
+--- 
+## 2. Loading data set
+Set up path to load data
+
+```{r load data}
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "parquet")
+raw_data <- open_dataset(data_path)
+```
+
+Glimpse data 
+
+```{r Glimpse data}
+print(n=26,
+      raw_data %>% 
+        glimpse())
+```
+
+
+--- 
+## 3. Overview of data 
+
+### 3.1. Numeric variables
+
+**tetanus mom** - Number of tetanus shots the child's mom has taken
+```{r tetanus_mom}
+# --- Number of entries grouped by tetanus_mom --- 
+ raw_data %>% 
+        group_by(tetanus_mom) %>% 
+        count() %>% 
+        arrange(desc(tetanus_mom)) %>% 
+        collect()
+
+# --- Basic stats --- 
+raw_data %>% 
+        arrow_summary("tetanus_mom") %>% 
+        collect()
+```
+Observations:
+- Positively skewed, with extreme values (outliers)
+
+**vacorder** - Vaccination order
+
+```{r vacorder}
+# --- Number of entries grouped by vacorder --- 
+raw_data %>% 
+        group_by(vacorder) %>% 
+        count() %>% 
+        arrange(desc(vacorder)) %>% 
+        collect()
+
+# --- Basic stats --- 
+raw_data %>% 
+        arrow_summary("vacorder") %>% 
+        collect()
+```
+Observations:
+- Positively skewed, with extreme values (outliers)
+
+**age**
+compute new column to analyze age of children
+```{r age}
+
+# create new R dataframe containing vaccine name and age (of vaccination)
+raw_data %>%
+  dplyr::filter(dob <= vacdate) %>%
+  mutate(
+    vacname = vacname,
+    week_age = arrow_weeks_between(dob, vacdate),
+    .keep="none") %>%
+  arrow_summary("week_age") %>% 
+  collect()
+
+```
+
+### 3.2. Categorical variables
+**sex** 
+```{r sex}
+raw_data %>%
+  group_by(sex) %>% 
+  count() %>% 
+  collect()
+```
+
+
+**vacname** - Vaccine name
+```{r vacname}
+# number of NA entries
+raw_data %>% 
+  dplyr::filter(is.na(vacname)) %>% 
+  count() %>% 
+  collect()
+
+# vaccine name
+raw_data %>% 
+        group_by(vacname) %>% 
+        count(sort = TRUE) %>% 
+        collect()
+
+```
+Observations:
+- Non-standardized naming schemes e.g. Uon van and TETANUS vaccine, Teatanus antitoxin vs  TETANUS antitoxin
+- Typos
+
+**vactype** - Type of vaccination
+Label:
+TCMR (Tiem chung mo rong) - Expanded program on Immunization
+TCDV (Tiem chung dich vu) - Vaccination through services 
+TCCD (Tiem chung chien dich) - Vaccination campaign
+```{r vactype}
+raw_data %>% 
+        group_by(vactype) %>% 
+        count() %>% 
+        collect()
+```
+
+**vacplace_type** - Type of vaccination place
+TCMR (Tiem chung mo rong) - EPI
+DV (Dich vu) -  service 
+BV (Benh vien) - hospital
+Dia diem khac - others
+```{r vacplace_type}
+raw_data %>% 
+        count(vacplace_type) %>% 
+        collect()
+```
+
+**vacplace**
+```{r vacplace}
+raw_data %>% 
+        group_by(vacplace) %>% 
+        count(sort=TRUE) %>% 
+        collect()
+```
+
+**vacplace0**
+```{r vacplace0}
+raw_data %>% 
+        group_by(vacplace0) %>% 
+        count(sort=TRUE) %>% 
+        collect()
+```
+Observations:
+- Inconsistent categories (type of vacplace vs name of vacplace)
+
+**place_update**
+```{r place_update}
+raw_data %>% 
+        group_by(place_update) %>% 
+        count(sort=TRUE) %>% 
+        collect()
+
+# check whether place update the same as vacplace (if returns 0 row -> vacplace the same as place update)
+raw_data %>% 
+  dplyr::filter(place_update != vacplace) %>% 
+  collect()
+```
+Observation:
+- Vacplace values are exactly the same as that of place_update
+
+
+**ethnic**
+```{r ethnic}
+ raw_data %>% 
+        group_by(ethnic) %>% 
+        count(sort=TRUE) %>% 
+        collect()
+```
+**province**
+```{r province}
+raw_data %>%
+        group_by(province) %>%
+        count(sort=TRUE) %>% 
+        collect()
+```
+Observation:
+- Expected 63, got 64 provinces (Tinh tap huan)
+
+**province_reg** - Province registered for vaccination (?)
+```{r province_reg}
+raw_data %>%
+        group_by(province_reg) %>%
+        count(sort=TRUE) %>% 
+        collect()
+```
+Observation:
+- Expected 63, got 62 (no entries for Binh Dinh)
+
+### 3.3. Dates 
+
+**dob** - Date of birth 
+```{r dob}
+# Number of NA entries
+raw_data %>% 
+  dplyr::filter(is.na(dob)) %>% count() %>% collect()
+
+# Basic stats
+raw_data %>% 
+  summarize(
+            min_value = min(dob, na.rm=TRUE),
+            max_value = max(dob, na.rm=TRUE),
+          ) %>% 
+  collect()
+```
+
+**vacdate** - Date of vaccination
+```{r vacdate}
+# number of NA entries
+raw_data %>% 
+  dplyr::filter(is.na(vacdate)) %>% 
+  count() %>% 
+  collect()
+
+# summary of vacdate
+raw_data %>% 
+  summarize(
+    min_date = min(vacdate, na.rm = TRUE),
+    max_date = max(vacdate, na.rm = TRUE)
+  ) %>% collect()
+
+# entries where date of vaccination is before date of birth
+raw_data %>% 
+  dplyr::filter(vacdate < dob) %>% 
+  select(vacdate, dob, place_update, file, rn) %>% 
+  collect()
+
+# entries where date of vaccination is before date of birth, grouped by place update
+raw_data %>% 
+  dplyr::filter(vacdate < dob) %>% 
+  count(place_update, sort=TRUE) %>% 
+  collect()
+
+```
+Observations:
+- Extreme values way over the plausible range (1-01-01 to 9202-08-21)
+- 115484 entries where dob is less than vacdate (contradictory values)
+
+### 3.4. String variables 
+```{r pid}
+# number of NA entries
+raw_data %>% 
+  dplyr::filter(is.na(pid)) %>% 
+  count() %>% 
+  collect()
+
+# Number of records for each pid/child
+raw_data %>% 
+  count(pid, sort=TRUE) %>% 
+  collect()
+
+# Summarize number of records for each pid
+raw_data %>% 
+  count(pid) %>% 
+    arrow_summary("n") %>% 
+    collect()
+```
+Observation:
+- Approximately 14,405,018 unique pid entries
+- Some pids has number of records above plausible range
+
+**caregiver** 
+```{r caregiver}
+# Check if rows have punctuation characters
+raw_data %>% 
+  dplyr::filter(str_detect(caregiver, "[[:punct:]]+")) %>% 
+  select(pid, caregiver) %>% 
+  distinct() %>% 
+  collect()
+```
+
+**name**
+```{r name}
+# Check if rows have punctuation characters
+raw_data %>% 
+  dplyr::filter(str_detect(name, "[[:punct:]]+")) %>%
+  select(pid, name) %>% 
+  distinct() %>% 
+  collect()
+
+# Extract rows with disabled (?) pid 
+raw_data %>% 
+  dplyr::filter(str_detect(name, stringr::regex("(Huỷ|Trùng)", ignore_case=TRUE))) %>% 
+  collect()
+
+# Extract rows with practically no name
+raw_data %>% 
+  dplyr::filter(name == ".") %>% 
+  count(pid) %>% 
+  collect()
+```
+
+
+
+
