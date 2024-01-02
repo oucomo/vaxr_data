@@ -6,6 +6,7 @@ output:
 ---
 ## 1. Load preprocessed data
 ```{r}
+library(arrow)
 data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "preprocessed") 
 
 preprocessed_data <- open_dataset(data_path)

@@ -70,6 +70,7 @@ write_dataset(
 
 # try loading vacname data
 standard_vacname_data <- open_dataset(file.path("/.", "cluster_data", "vrdata", "standardized", "vacname") )
+standard_vacname_data
 ```
 
 #### Generate lite version of standardized vacname dataset
@@ -100,11 +101,6 @@ Create pathogen dataset
 data_path <- file.path("/.", "cluster_data", "vrdata", "standardized", "vacname") 
 standard_vacname_data <- open_dataset(data_path)
 
-standard_vacname_data %>% 
-  select(pid) %>% 
-  distinct() %>% 
-  compute()
-
 vacname_pathogen <- as_arrow_table(vacname_pathogen)
 vacname_standardized <- as_arrow_table(vacname_standardized)
 gc()
@@ -120,10 +116,16 @@ standard_vacname_pathogen <- vacname_pathogen %>%
 # join standard_vacname with standard_vacname_pathogen
 pathogen_data <- standard_vacname_data %>% 
   left_join(standard_vacname_pathogen, by=join_by(vacname == standard_name)) 
+
+pathogen_data %>% 
+  count(pathogen) %>% 
+  collect()
+
 ```
 
 #### Save pathogen data 
 ```{r save pathogen dataset}
+gc()
 save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
 write_dataset(
   dataset = pathogen_data,
@@ -131,8 +133,6 @@ write_dataset(
   format = "parquet",
   partitioning = list("pathogen")
 )
-
-pathogen_data_lite <- open_dataset(file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen_lite"))
 ```
 
 #### Load pathogen data and filter duplicates
@@ -142,7 +142,11 @@ Filtering algorithmn cannot runs on full dataset (not enough RAM) -> create a li
 data_path <- file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen") 
 pathogen_data <- open_dataset(data_path)
 
+# pathogen_data %>%
+#   count(pathogen) %>% 
+#   collect()
 pathogen_data %>% nrow()
+
 is_dups <- util_compute_duplicates(pathogen_data, c("pid", "vacdate", "pathogen"))
 length(which(is_dups))
 is_dups <- as_arrow_array(is_dups)
@@ -152,32 +156,40 @@ pathogen_data_lite <- pathogen_data %>%
   select(pid, vacname, pathogen, vacdate, vactype, vacplace, vacplace_type, province_reg, district_reg, commune_reg) %>% 
   compute()
 pathogen_data_lite$is_dups <- is_dups
-pathogen_data_lite <- pathogen_data_lite %>% 
-  dplyr::filter(!is_dups) %>% 
-  select(-is_dups) %>% 
-  compute()
 
-pathogen_data_lite
+rm(pathogen_data)
+gc()
+
+pathogen_data_lite  
 ```
 
 Some notable observations
-- Pathogen data (without duplicate filtering): 314,081,626 records. (313,705,843 after filtering)
+- Pathogen data (without duplicate filtering): 311,862,321 records. (311,482,736 after filtering)
 - Unique pids in dataset after filtering NOT VACCINE and SERUM: 14,400,339 pids 
-- Number of duplicates in pathogen dataset: 375,783 records
+- Number of duplicates in pathogen dataset: 379,585 records
 
 #### Save lite version of pathogen data
 
 ```{r Save pathogen dataset after filtering dupicate}
 save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
-write_dataset(
-  dataset = pathogen_data_lite,
-  path = file.path(save_path, "pathogen_lite"),
-  format = "parquet",
-  partitioning = list("pathogen")
-)
+
+pathogen_data_lite %>% 
+  filter(!is_dups) %>% 
+  select(-is_dups) %>% 
+  write_dataset(
+    path = file.path(save_path, "pathogen_lite"),
+    format = "parquet",
+    partitioning = list("pathogen")
+  )
 
 # try loading data 
-pathogen_data_lite <- open_dataset(file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen_lite"))
+saved_pathogen_lite<- open_dataset(file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen_lite"))
+gc()
+saved_pathogen_lite %>% nrow()
+
+saved_pathogen_lite %>% 
+  count(pathogen) %>% 
+  collect()
 ```
 
 
