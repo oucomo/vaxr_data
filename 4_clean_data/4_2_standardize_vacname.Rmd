@@ -14,8 +14,11 @@ vaccine_path <- file.path("/.", "cluster_data", "vrdata", "vaccine_data")
 
 preprocessed_data <- open_dataset(data_path)
 
+# read vacname to pathogen mapping table
 vacname_pathogen <- readRDS(file.path(vaccine_path, "vacname_pathogen.rds"))
 vacname_pathogen
+
+# read vacname to standardized name mapping table 
 vacname_standardized <- readRDS(file.path(vaccine_path, "vacname_standardized.rds"))
 vacname_standardized
 ```
@@ -24,7 +27,7 @@ vacname_standardized
 
 - Vaccination dataset that include standardized vacname
 - Vaccination dataset that include pathogen instead of vacname
-- Personal information dataset that includes personal information for each pid
+- Personal information dataset that only includes personal information for each pid (decouple personal information from vaccination record)
 
 ### 2.1. Create dataset with standardized vacname
 ```{r standardize vacname}
@@ -43,7 +46,8 @@ standard_vacname_data <- preprocessed_data %>%
   compute()
 ```
 
-
+De-duplicate vaccination record
+Assumption: an individual cannot take multiple doses of the same vaccine on the same day
 ```{r filter out duplicates}
 # --- run duplicate checking
 is_dups <- util_compute_duplicates(standard_vacname_data, c("pid","vacname", "vacdate"))
@@ -74,6 +78,7 @@ standard_vacname_data
 ```
 
 #### Generate lite version of standardized vacname dataset
+Create a version of vacname dataset that exclude personal information
 ```{r save lite version of standardized vacname dataset}
 standard_vacname_data
 
@@ -136,7 +141,7 @@ write_dataset(
 ```
 
 #### Load pathogen data and filter duplicates
-Filtering algorithmn cannot runs on full dataset (not enough RAM) -> create a lite version of dataset, separating personal info and vaccination shots info
+Filtering algorithmn cannot runs on full dataset (not enough RAM) -> perform de-duplcation on lite version of dataset (separating personal info and vaccination shots info)
 
 ```{r perform duplicate checking}
 data_path <- file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen") 
@@ -268,12 +273,7 @@ personal_data
 ```
 
 
-
-
---- 
-### 3. Further analysis after cleaning
-
-#### Load dataset
+#### Test loading dataset
 ```{r}
 vacname_lite <- open_dataset(file.path("/./", "cluster_data", "vrdata", "standardized", "vacname_lite"))
 vacname_lite
@@ -282,53 +282,4 @@ pathogen_lite <- open_dataset(file.path("/./", "cluster_data", "vrdata", "standa
 pathogen_lite
 ```
 
-#### Visualize shots per pathogen
-```{r}
-options(bitmapType='cairo')
 
-pathogen_data_lite %>% 
-  count(pathogen) %>% 
-  collect() %>% 
-  ggplot(aes(
-    x = pathogen,
-    y = n
-  )) +
-  geom_bar(stat = "identity", fill = "#308ac2") +
-  # scale_y_log10() +
-  theme_bw() +
-  labs(y = "count") +
-  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.8))
-```
-
-#### Check jev situation
-```{r}
-data_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
-pathogen_data_lite <- open_dataset(file.path(data_path, "pathogen_lite"))
-
-# find number of pids with mixed jev shots
-pathogen_lite %>% 
-  dplyr::filter(pathogen == "jev") %>%
-  select(pid, vacname) %>% 
-  distinct() %>% 
-  group_by(pid) %>% 
-  count() %>% 
-  dplyr::filter(n>=2) %>% 
-  collect()
-```
-Observations:
-- 337,944 pids that takes mixed shots 
-
-```{r sample pids}
-pathogen_data_lite %>% 
-  dplyr::filter(pid == "225010520150013" & pathogen == "jev") %>% 
-  collect()
-```
-
-
-
-
-### 4. Contextual data quality after cleaning
-#### 4.1. ratio between number of children in dataset vs world pop dataset
-
-
-#### 4.2. ratio between number of children in dataset vs data from the GSO 

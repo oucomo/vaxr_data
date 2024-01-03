@@ -182,11 +182,13 @@ pid_names %>%
     pid == "819010720180337"
   ) %>% collect()
 ```
+
+
 ```{r update preprocessed data after checking}
 preprocessed_data <- standardized_name
 preprocessed_data
 ```
-About 118,259 have empty name and caregiver after cleaning
+About 118,259 records have empty name and caregiver after cleaning
 
 --- 
 ### 3. Save preprocessed data 

@@ -6,9 +6,9 @@ output: html_notebook
 ## 1. Import libraries 
 
 ```{r}
+library(ArrowDQAToolkit)
 library(sets)
 library(data.table)
-library(ArrowDQAToolkit)
 ```
 
 ## 2. Loading data set

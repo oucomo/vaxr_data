@@ -66,10 +66,6 @@ vactype_by_region <- vactype_by_region +
 vactype_by_region 
 ```
 
-### Vacname, age distribution  
 
-```{r}
-
-```
 
 

@@ -1,4 +1,4 @@
-## Assess data
+## 3. Assess data
 Contains code for assessing data quality
 
 ### Intrinsic quality
@@ -8,15 +8,9 @@ How reliable the data is, defined by 4 main metrics
 - Consistency
 - Accuracy
 
-### Contextual quality (work in progress)
-How "good" the data is for a specific task. 
-Some metrics to consider:
-- Ratio between number of children in registry and number of children in other external datasets
-- Data density across a timeframe, in each region
-
-Contextual quality should only be done after the data cleaning steps
+[Google slide on the topic](https://docs.google.com/presentation/d/1SS0r3UIDFmyJ8uGEC6GON2IpxoOEKjZUPqobX5-Achs/edit?usp=sharing) \
+[Report summarizing the result](https://docs.google.com/document/d/1QgWB9Wtox5fz87fuW5caL8M2a5Jjh6BhQgA0YeJRda4/edit?usp=sharing)
 
 ### Files
 - **3_1_intrinsic_quality.Rmd** - perform intrinsic quality assessment
 - **3_2_visualize_data.Rmd** - source code for graphs
-- **3_3_contextual_quality.Rmd** (to-do)

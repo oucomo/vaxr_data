@@ -84,7 +84,6 @@ raw_data %>%
     .keep="none") %>%
   arrow_summary("week_age") %>% 
   collect()
-
 ```
 
 ### 3.2. Categorical variables
@@ -291,12 +290,12 @@ raw_data %>%
   distinct() %>% 
   collect()
 
-# Extract rows with disabled (?) pid 
+# --- Extract rows with disabled (?) pid 
 raw_data %>% 
   dplyr::filter(str_detect(name, stringr::regex("(Huỷ|Trùng)", ignore_case=TRUE))) %>% 
   collect()
 
-# Extract rows with practically no name
+# --- Extract rows with practically no name
 raw_data %>% 
   dplyr::filter(name == ".") %>% 
   count(pid) %>% 
