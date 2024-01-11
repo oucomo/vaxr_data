@@ -8,7 +8,6 @@ output:
 ## 1. Import libraries
 ```{r}
 library(ArrowDQAToolkit)
-library(arrow)
 ```
 
 
@@ -20,7 +19,6 @@ pathogen_lite <- open_dataset(file.path("/./", "cluster_data", "vrdata", "standa
 vacname_lite <- open_dataset(file.path("/./", "cluster_data", "vrdata", "standardized", "vacname_lite"))
 
 unified_pids <- read_parquet("./unified_pid.parquet", as_data_frame = FALSE)
-personal_info
 ```
 
 ## 3. Clean data
@@ -40,6 +38,7 @@ personal_info %>%
     is.na(unified_pid) | (pid == unified_pid)
   ) %>% 
   select(-unified_pid, -duplicated) %>% 
+  rename(latest_vacdate = vacdate) %>% 
   compute() %>% 
   write_parquet(file.path(cleaned_data_path, "personal_info.parquet"))
 ```
@@ -64,7 +63,9 @@ vacname_lite <- vacname_lite %>%
 # remove duplicated vaccination records after updating pid
 is_dups <- util_compute_duplicates(vacname_lite, vars = c("pid","vacname", "vacdate"))
 
-vacname_lite$is_dups <- is_dups
+vacname_lite$is_dups <- as_arrow_array(is_dups)
+vacname_lite
+
 vacname_lite %>% 
   filter(is_dups==FALSE) %>% 
   select(-is_dups) %>% 
@@ -75,8 +76,7 @@ vacname_lite %>%
   )
 ```
 
-No. record from 153,083,647 reduce to 152,539,312 records (544,335 duplicated records) 
-
+No. record from 153,083,647 reduce to 152,548,504 records (535,143 duplicated records) 
 
 ### Clean pathogen data 
 ```{r update pid in pathogen_lite}
@@ -89,7 +89,7 @@ pathogen_lite <- pathogen_lite %>%
     # update old pids with the unified pids
     pid = ifelse(is.na(unified_pid), pid, unified_pid)
   ) %>% 
-  select(-unfied_pid)
+  select(-unified_pid) %>% 
   compute()
 ```
 
@@ -101,7 +101,7 @@ pathogen_lite$is_dups <- as_arrow_array(is_dups)
 
 pathogen_lite %>% 
   filter(!is_dups) %>% 
-  select(-is_dups, -unified_pid) %>% 
+  select(-is_dups) %>% 
   write_dataset(
     path = file.path(cleaned_data_path, "pathogen"),
     format = "parquet",
@@ -109,8 +109,7 @@ pathogen_lite %>%
   )
 
 cleaned_pathogen_lite <- open_dataset(file.path(cleaned_data_path, "pathogen"))
-
-cleaned_pathogen_lite
+cleaned_pathogen_lite %>% nrow()
 ```
 
-No. records reduce from 311,482,736 to 309,796,722 records (1,686,014 duplicated records)
+No. records reduce from 311,482,736 to 309,820,071 records (1,662,665 duplicated records)

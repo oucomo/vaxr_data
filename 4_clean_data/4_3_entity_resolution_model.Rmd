@@ -29,7 +29,7 @@ deterministic_linking <- personal_info %>%
     # remove entity that have invalid names
     str_length(name) >= 2,
     # remove entity that have invalid names
-    str_length(caregiver) >= 2 
+    str_length(caregiver) >= 2
   ) %>% 
   select(pid.x, pid.y) %>% 
   rename(
@@ -459,8 +459,10 @@ preprocessed %>%
   collect()
 ```
 
+----
+## 6. Resolve false match from manual inspection
 
-```{r generate dataset of linked pairs after manual inspection}
+```{r update result for probabilistic linking after manual inspection}
 # read table of pairs manually classified as false match
 false_pos <- read_csv("./manual_inspection/false_positive.csv", col_types = cols(pid_l = "c", pid_r = "c"))
 false_pos$true_match <- FALSE
@@ -479,12 +481,26 @@ updated_linked_pairs <- linked_pairs %>%
   ) %>% 
   collect() %>% 
   # update rows that are manually classified as false match
-  rows_update(false_pos, unmatched = "ignore") %>% 
-  rows_update(false_neg, unmatched = "ignore") %>% 
+  rows_update(false_pos, unmatched = "ignore", by = c("pid_l", "pid_r")) %>% 
+  rows_update(false_neg, unmatched = "ignore", by = c("pid_l", "pid_r")) %>% 
   filter(true_match == TRUE) %>% 
   select(-true_match)
   
 updated_linked_pairs
-# write_parquet(updated_linked_pairs, "./linked_data/post_inspection_linked_pairs.parquet")
+# write_parquet(updated_linked_pairs, "./post_inspection_linked_pairs/post_inspection_prob_link.parquet")
 ```
+
+```{r update result for deterministic linking after manual inspection}
+deterministic_linking <- read_parquet("./linked_data/deterministic_linking_pairs.parquet")
+
+dem_false_pos <- read_csv("./manual_inspection/deterministic_false_pos.csv", col_types = cols(pid_l = "c", pid_r = "c"))
+
+deterministic_linking <- deterministic_linking %>% 
+  rows_delete(dem_false_pos, by = c("pid_l", "pid_r") )
+
+# write_parquet(deterministic_linking, "./post_inspection_linked_pairs/post_inspection_dem_link.parquet")
+```
+
+
+
 
