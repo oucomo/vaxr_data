@@ -1,0 +1,214 @@
+---
+title: "Further look for abnormalities"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+## 1. Import libraries
+```{r}
+library(ArrowDQAToolkit)
+```
+
+
+## 2. Load data
+```{r}
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "parquet")
+raw_data <- open_dataset(data_path)
+```
+
+## 3. Data screening  
+
+### Check consistency of PID
+```{r same pid but different name}
+non_unique_name_pids <- raw_data %>% 
+  mutate(
+    name = str_to_lower(name),
+    .keep = "all"
+  ) %>% 
+  select(pid, name) %>%
+  group_by(pid) %>% # group by pid
+  distinct(name) %>% # get distinct name in each group
+  count(sort=TRUE) %>% # count number of distinct name in each group
+  dplyr::filter(n > 1) %>%
+  collect()
+
+#---- view the non unique names associated with the pids
+raw_data %>% 
+  dplyr::filter(pid %in% non_unique_name_pids$pid) %>% 
+  distinct(pid, name) %>% 
+  arrange(pid) %>% 
+  collect()
+
+#--- Investigate number of duplicated [dob, vacname, vacdate] caused by 
+# potential non-unique pid issue
+duplicated_shots <- raw_data %>% 
+  dplyr::filter(pid %in% non_unique_name_pids$pid) %>% 
+  distinct(pid, name, dob, vacname, vacdate) %>% 
+  group_by(pid) %>% # group data by pid 
+  count(vacname, vacdate, sort=TRUE) %>% #count number of identical shots
+  dplyr::filter(
+    n > 1
+  ) %>%
+  collect()
+duplicated_shots
+
+
+```
+- 284 PIDs has more than 1 unique name associated with it
+
+```{r same pid but different dob}
+non_unique_dob_pid <- raw_data %>% 
+  select(pid, dob) %>% 
+  group_by(pid) %>% # group by pid
+  distinct(dob) %>% 
+  count(sort=TRUE) %>% # get number of distinct dob in each group
+  dplyr::filter(n>1) %>% #  filter out records with more than 1 dob
+  collect()
+
+# filter out rows that has non-unique dob 
+raw_data %>% 
+  dplyr::filter(pid %in% non_unique_dob_pid$pid) %>% 
+  distinct(pid, name, dob) %>% 
+  arrange(pid) %>% 
+  collect()
+```
+- 18 PIDs has more than 1 unique dob associated with it
+
+```{r same pid but different province_reg}
+raw_data %>% 
+  select(pid, province_reg) %>% 
+  group_by(pid) %>% 
+  distinct(province_reg) %>% 
+  count(pid) %>% 
+  dplyr::filter(n > 1) %>% 
+  collect()
+```
+- 671 pids has more than 1 associated province_reg
+
+```{r same pid but different name and different dob}
+
+# get pids that have non unique name and dob
+non_unique_pid <- dplyr::intersect(non_unique_dob_pid$pid, non_unique_name_pids$pid) 
+
+raw_data %>% 
+  dplyr::filter(pid %in% non_unique_pid) %>% 
+  distinct(pid, name, dob) %>% 
+  arrange(pid) %>% 
+  collect()
+
+```
+
+---- 
+
+### Check consistency of data extracted from PID vs data from other column
+```{r check whether province_id consistent with province_reg}
+# check province_reg vs province_id extracted from pid 
+raw_data %>% 
+  mutate( # extract province_id from pid
+    province_id = str_sub(pid, 1,3)
+  ) %>% 
+  select(
+    province_id, province_reg
+  ) %>% 
+  group_by(
+    province_id, province_reg
+  ) %>% 
+  count(sort=TRUE) %>% 
+  arrange(province_id) %>% 
+  collect()
+
+# count number of province_reg associated with each province_id
+raw_data %>% 
+  mutate( # extract province_id from pid
+    province_id = str_sub(pid, 1,3)
+  ) %>% 
+  select(
+    province_id, province_reg
+  ) %>% 
+  group_by(
+    province_id
+  ) %>% 
+  distinct(province_id, province_reg) %>% 
+  count(province_id) %>% 
+  arrange(province_id) %>% 
+  collect()
+```
+Notes:
+- province_id from pid is not consistent with province_reg
+- 1 pid can have more than 1 province_reg due to moving
+
+
+
+```{r check province_id & commune_id & birth_year from pid}
+raw_data %>% 
+  mutate(
+    province_id = str_sub(pid, 1, 3),
+    district_id = str_sub(pid, 4, 5),
+    commune_id = str_sub(pid, 6, 7),
+    birth_year = str_sub(pid, 8, 11)
+  ) %>% select(
+    pid, province_reg, province_id, district_id, commune_id, dob, birth_year
+  ) %>% collect()
+
+# whether birth year from dob is the same as that from pid
+raw_data %>% 
+  mutate(
+    birth_year = str_sub(pid, 8, 11),
+    year_fr_dob = cast(year(dob), arrow::string())
+  ) %>%
+  select(pid, dob, year_fr_dob, birth_year) %>% 
+  dplyr::filter(year_fr_dob != birth_year) %>% 
+  distinct() %>% 
+  arrange(birth_year) %>% 
+  collect()
+```
+- 89,081 unique pid has non-consistent birth year from dob vs pid
+- value from dob more consistent with plausible range
+
+--- 
+
+### Check consistency of vacname with age of vaccination
+
+
+```{r outliers for age of vaccination for each vaccine}
+computed_age <- raw_data %>%
+  dplyr::filter(dob <= vacdate) %>% 
+  mutate(
+    week_age = arrow_weeks_between(dob, vacdate),
+    .keep = "unused"
+  ) %>% 
+  select(pid, vacname, week_age) %>% 
+  compute()
+
+# compute list of vacnames
+vacnames <- computed_age %>% 
+   distinct(vacname) %>% 
+  select(vacname) %>% 
+  collect()
+
+varname <- character(0)
+no_outliers <- character(0)
+percentage <- float()
+
+# compute outliers for each vacname
+for (row in 1:nrow(vacnames)){
+  data <- computed_age %>% dplyr::filter(
+    vacname == vacnames[[row, 1]], # filter records with vacname
+  ) %>% compute()
+  
+  # get outliers in that group
+  outliers <- util_compute_outliers(data, "week_age")
+  
+  varname <- append(varname, vacnames[[row, 1]])
+  no_outliers <- append(no_outliers, str_interp("${nrow(outliers)} / ${nrow(data)}"))
+  percentage <- append(percentage, (nrow(outliers) / nrow(data)))
+}
+
+data.frame(varname, no_outliers)
+```
+
+
+
+

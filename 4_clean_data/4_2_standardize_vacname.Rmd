@@ -1,0 +1,285 @@
+---
+title: "Standize names in the dataset, run duplication detection again"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+## 1. Load preprocessed data
+```{r}
+library(ArrowDQAToolkit)
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "preprocessed") 
+vaccine_path <- file.path("/.", "cluster_data", "vrdata", "vaccine_data")
+
+preprocessed_data <- open_dataset(data_path)
+
+# read vacname to pathogen mapping table
+vacname_pathogen <- readRDS(file.path(vaccine_path, "vacname_pathogen.rds"))
+vacname_pathogen
+
+# read vacname to standardized name mapping table 
+vacname_standardized <- readRDS(file.path(vaccine_path, "vacname_standardized.rds"))
+vacname_standardized
+```
+
+## 2. Create datasets for different use case
+
+- Vaccination dataset that include standardized vacname
+- Vaccination dataset that include pathogen instead of vacname
+- Personal information dataset that only includes personal information for each pid (decouple personal information from vaccination record)
+
+### 2.1. Create dataset with standardized vacname
+```{r standardize vacname}
+vacname_standardized <- as_arrow_table(vacname_standardized)
+gc()
+
+# join preprocessed_data with vacname_pathogen
+# filter rows annotated as SERUM or NOT VACCINE 
+standard_vacname_data <- preprocessed_data %>% 
+  # standardize spacing before joining
+  mutate(vacname = str_replace_all(vacname, "[[:space:]]+", " ")) %>%
+  left_join(vacname_standardized, by=join_by(vacname == vacc_name)) %>% # try joining raw_data to standardized vacname
+  dplyr::filter(standard_name != "SERUM", standard_name != "NOT VACCINE") %>%
+  mutate(vacname = standard_name) %>% 
+  select(-standard_name) %>% 
+  compute()
+```
+
+De-duplicate vaccination record
+Assumption: an individual cannot take multiple doses of the same vaccine on the same day
+```{r filter out duplicates}
+# --- run duplicate checking
+is_dups <- util_compute_duplicates(standard_vacname_data, c("pid","vacname", "vacdate"))
+gc()
+standard_vacname_data$is_duplicate <- as_arrow_array(is_dups)
+
+# filter out duplicated rows
+standard_vacname_data <- standard_vacname_data %>% 
+  dplyr::filter(!is_duplicate) %>% 
+  select(-is_duplicate) %>% 
+  compute()
+```
+Notable observations:
+Dataset have 153,083,647 records after filtering duplicates
+
+```{r save data with standardized vacname}
+save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
+write_dataset(
+  dataset = standard_vacname_data,
+  path = file.path(save_path, "vacname"),
+  format = "parquet",
+  partitioning = list("province_reg2")
+)
+
+# try loading vacname data
+standard_vacname_data <- open_dataset(file.path("/.", "cluster_data", "vrdata", "standardized", "vacname") )
+standard_vacname_data
+```
+
+#### Generate lite version of standardized vacname dataset
+Create a version of vacname dataset that exclude personal information
+```{r save lite version of standardized vacname dataset}
+standard_vacname_data
+
+#--- Generate lite version of standard vacname dataset
+standard_vacname_lite <- standard_vacname_data %>% 
+  select(pid, vacname, vacdate, vactype, vacplace, vacplace_type, province_reg, district_reg, commune_reg, province_reg2) %>% 
+  compute()
+standard_vacname_lite
+
+# --- Save lite version of standard vacname dataset
+save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
+write_dataset(
+  dataset = standard_vacname_lite,
+  path = file.path(save_path, "vacname_lite"),
+  format = "parquet",
+  partitioning = list("province_reg2")
+)
+```
+
+
+### 2.2. Create dataset with pathogen instead of vacname
+Create pathogen dataset
+```{r pathogen dataset}
+# --- reload standardized vacname if crashes due to overloading RAM
+data_path <- file.path("/.", "cluster_data", "vrdata", "standardized", "vacname") 
+standard_vacname_data <- open_dataset(data_path)
+
+vacname_pathogen <- as_arrow_table(vacname_pathogen)
+vacname_standardized <- as_arrow_table(vacname_standardized)
+gc()
+# --- 
+
+# join vacname_pathogen to standard_vacname to get table of standard vacname to pathogens
+standard_vacname_pathogen <- vacname_pathogen %>% 
+  full_join(vacname_standardized, by = join_by(vacname == vacc_name)) %>% 
+  select(standard_name, pathogen) %>% 
+  distinct() %>% 
+  compute()
+
+# join standard_vacname with standard_vacname_pathogen
+pathogen_data <- standard_vacname_data %>% 
+  left_join(standard_vacname_pathogen, by=join_by(vacname == standard_name)) 
+
+pathogen_data %>% 
+  count(pathogen) %>% 
+  collect()
+
+```
+
+#### Save pathogen data 
+```{r save pathogen dataset}
+gc()
+save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
+write_dataset(
+  dataset = pathogen_data,
+  path = file.path(save_path, "pathogen"),
+  format = "parquet",
+  partitioning = list("pathogen")
+)
+```
+
+#### Load pathogen data and filter duplicates
+Filtering algorithmn cannot runs on full dataset (not enough RAM) -> perform de-duplcation on lite version of dataset (separating personal info and vaccination shots info)
+
+```{r perform duplicate checking}
+data_path <- file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen") 
+pathogen_data <- open_dataset(data_path)
+
+# pathogen_data %>%
+#   count(pathogen) %>% 
+#   collect()
+pathogen_data %>% nrow()
+
+is_dups <- util_compute_duplicates(pathogen_data, c("pid", "vacdate", "pathogen"))
+length(which(is_dups))
+is_dups <- as_arrow_array(is_dups)
+
+# --- perform duplicate filtering on subset of columns
+pathogen_data_lite <- pathogen_data %>% 
+  select(pid, vacname, pathogen, vacdate, vactype, vacplace, vacplace_type, province_reg, district_reg, commune_reg) %>% 
+  compute()
+pathogen_data_lite$is_dups <- is_dups
+
+rm(pathogen_data)
+gc()
+
+pathogen_data_lite  
+```
+
+Some notable observations
+- Pathogen data (without duplicate filtering): 311,862,321 records. (311,482,736 after filtering)
+- Unique pids in dataset after filtering NOT VACCINE and SERUM: 14,400,339 pids 
+- Number of duplicates in pathogen dataset: 379,585 records
+
+#### Save lite version of pathogen data
+
+```{r Save pathogen dataset after filtering dupicate}
+save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
+
+pathogen_data_lite %>% 
+  filter(!is_dups) %>% 
+  select(-is_dups) %>% 
+  write_dataset(
+    path = file.path(save_path, "pathogen_lite"),
+    format = "parquet",
+    partitioning = list("pathogen")
+  )
+
+# try loading data 
+saved_pathogen_lite<- open_dataset(file.path("/.", "cluster_data", "vrdata", "standardized", "pathogen_lite"))
+gc()
+saved_pathogen_lite %>% nrow()
+
+saved_pathogen_lite %>% 
+  count(pathogen) %>% 
+  collect()
+```
+
+
+### 2.3. Create dataset for personal info only
+A lengthy work around to only keep the latest information (based on vacdate) for each pid  
+
+```{r create dataset for personal info only}
+# TODO: generate personal info with latest info
+# - Get dataset of pid and its latest (max) vacdate
+# - Get latest pid info (join with prev dataset on pid, vacdate, select personal info cols then distinct)
+
+# dataset of pid and latest vacdate
+pid_lastest_vacdate <- standard_vacname_data %>% 
+  select(pid, vacdate) %>% 
+  group_by(pid) %>% 
+  summarize(
+    last_vacdate = max(vacdate)
+  ) %>% compute()
+
+# get lastest pid info
+personal_info_data <- standard_vacname_data %>% 
+  inner_join(pid_lastest_vacdate, by = join_by(pid == pid, vacdate == last_vacdate)) %>% 
+  select(pid, name, sex, dob, ethnic, fup, province, district, commune, caregiver, tetanus_status, vacdate, duplicated) %>% 
+  distinct() %>% 
+  compute() 
+```
+
+
+```{r check personal info dataset}
+personal_info_data %>% 
+  group_by(pid) %>% 
+  count() %>% 
+  dplyr::filter(
+    n>1
+  ) %>% 
+  arrange(n) %>% 
+  collect()
+```
+
+```{r sample error data}
+raw_data <- open_dataset("/./cluster_data/vrdata/raw/parquet")
+
+personal_info_data %>% 
+  dplyr::filter(
+    pid == "701431320210028"
+  ) %>% collect()
+
+raw_data %>% filter(
+  vacdate == ymd("2021-07-22"),
+  pid == "403210920210043"
+) %>% collect()
+```
+
+Some manual handling for cases where there are different information for a pid, even on the same vacdate
+```{r}
+personal_info_data <- personal_info_data %>% 
+  filter( !(pid == "801152920220053" & (name == caregiver)) ) %>% 
+  filter( !(pid == "701150120220090" & (name == caregiver)) ) %>% 
+  filter( !(pid == "401511720210007" & (district == "Krông Năng")) ) %>% 
+  filter( !(pid == "701130720170496" & !fup ) ) %>% 
+  filter( !(pid == "701431320210028" & (province == "Đồng Nai")) ) %>% 
+  filter( !(pid == "403210920210043" & (province == "Gia Lai")) ) %>% 
+  compute()
+
+nrow(pid_lastest_vacdate) == nrow(personal_info_data)
+```
+
+
+```{r Save personal info dataset}
+save_path <- file.path("/.", "cluster_data", "vrdata", "standardized") 
+write_parquet(personal_info_data, file.path(save_path, "personal_info.parquet"))
+
+# try reading personal info dataset
+personal_data <- read_parquet( file.path("/.", "cluster_data", "vrdata", "standardized", "personal_info.parquet") )
+personal_data
+```
+
+
+#### Test loading dataset
+```{r}
+vacname_lite <- open_dataset(file.path("/./", "cluster_data", "vrdata", "standardized", "vacname_lite"))
+vacname_lite
+
+pathogen_lite <- open_dataset(file.path("/./", "cluster_data", "vrdata", "standardized", "pathogen_lite"))
+pathogen_lite
+```
+
+

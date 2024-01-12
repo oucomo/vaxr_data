@@ -1,0 +1,251 @@
+---
+title: "Assess contextual quality after cleaning step"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+# 1. Import libraries
+```{r}
+# download gso repo
+# devtools::install_github("epix-project/gso", build_vignettes = TRUE)
+library(ArrowDQAToolkit)
+options(bitmapType='cairo')
+library(readxl)
+library(stringi)
+library(plotly)
+```
+
+# 2. Read relevant data
+```{r}
+personal_info <- read_parquet(file.path("/./", "cluster_data", "vrdata", "cleaned", "personal_info.parquet"), as_data_frame = FALSE)
+pathogen <- open_dataset(file.path("/./", "cluster_data", "vrdata", "cleaned", "pathogen"))
+vacname <- open_dataset(file.path("/./", "cluster_data", "vrdata", "cleaned", "vacname"))
+
+pathogen %>% nrow()
+```
+
+```{r read data from excel}
+# --- Read data from GSO excel
+avg_population <- read_excel("./avg_population.xlsx")
+crude_birth_rate <- read_excel("./crude_birth_rate.xlsx")
+
+crude_birth_rate <- crude_birth_rate  %>% 
+  rename(birth_rate = `crude birth rate`) %>% 
+  mutate(
+    province = stri_trans_general(province, "latin-ascii")
+  ) 
+avg_population <- avg_population %>% mutate(
+    province = stri_trans_general(province, "latin-ascii")
+  )
+
+crude_birth_rate
+avg_population
+```
+
+```{r compute number of births}
+# --- compute number of births from birth rate and average population dataset
+birth_count <- crude_birth_rate %>% 
+  mutate(
+    province = str_replace(province, " - ", " "),
+    province = str_replace(province, "TP.", ""),
+    province = str_trim(province)
+  ) %>% 
+  full_join(
+    avg_population %>% 
+      mutate(
+      province = str_replace(province, " - ", " "),
+      province = str_replace(province, "TP.", ""),
+      province = str_trim(province)
+      ), 
+    by = join_by(province, year)
+  ) %>% 
+  mutate(
+    # multiply by 1000 as avg population dataset is in thousand unit
+    no_birth = total*(birth_rate/1000)*1000
+  ) 
+
+```
+
+
+# 3. Analyses
+
+
+## 3.1. Data coverage 
+```{r}
+# --- get earliest vaccination record of each pid
+earliest_records <- vacname %>% 
+  group_by(
+    pid
+  ) %>% 
+  filter(
+    vacdate >= dmy("01-01-2014")
+    ) %>% 
+  summarize(
+    earliest_vacdate = min(vacdate)
+  ) %>% 
+  mutate(join_key = paste(pid, earliest_vacdate, sep ="_")) %>% 
+  compute() 
+earliest_records
+```
+```{r get records of the earliest vaccination records}
+# --- get earliest vaccination records 
+vaccination_records <- vacname %>% 
+  mutate(join_key = paste(pid, vacdate, sep = "_")) %>% 
+  select(pid, vacdate, join_key, province_reg) %>% 
+  inner_join(earliest_records, by = join_by(join_key)) %>% 
+  select(-join_key, -pid.y) %>% 
+  rename(pid = pid.x) %>% 
+  arrange(vacdate) %>% 
+  distinct() 
+
+
+# --- join using pid to get province and dob variables
+record_with_dob <- vaccination_records %>% 
+  inner_join(personal_info, by = join_by(pid == pid)) %>% 
+  select(pid, vacdate, dob, province_reg, province) 
+```
+
+### pid count grouped by province vs province_reg
+```{r pid count grouped by province}
+births_by_province_reg <- record_with_dob %>% 
+  # get birth year
+  mutate(birth_year = year(dob)) %>% 
+  # count number of children born in each year recorded in the dataset 
+  group_by(province_reg, birth_year) %>% 
+  distinct(pid) %>% 
+  count() %>% 
+  rename(province = province_reg) %>% 
+  collect()
+```
+
+### Function to calculate coverage
+```{r define function to calculate coverage }
+generate_coverage_data <- function (data){
+  data %>% 
+  mutate(
+    province = stri_trans_general(province, "latin-ascii"),
+    province = str_replace(province, "Thanh pho", ""),
+    province = str_replace(province, " - ", " "),
+    province = str_trim(province)
+    ) %>% 
+  full_join(
+    birth_count %>% 
+      mutate(year = as.integer(year)) %>% 
+      filter(province != "Tay Nguyen"),
+    by = join_by(province == province, birth_year == year)
+  ) %>% 
+  mutate(
+    coverage = (n/no_birth)
+  ) %>% 
+  select(province, birth_year, coverage) %>% 
+  filter(birth_year <= 2021)
+}
+```
+
+
+### Calculate coverage
+```{r calculate coverage}
+coverage_data <- generate_coverage_data(births_by_province_reg)
+
+plot <- coverage_data %>%
+  ggplot(aes(x = factor(birth_year), y = province, fill = coverage)) +
+      geom_tile() +
+      # scale_fill_gradient(low = "white", high = "#42b6f5") 
+      scale_fill_binned(low = "white", high = "#42b6f5")
+plot
+
+# --- save plot as PNG
+ggsave(file = "province_reg_coverage.png", width = 14, height = 10)
+```
+
+```{r analyze coverage data}
+# get number of overstimates, quantiles
+coverage_data %>% 
+  ungroup() %>% 
+  filter(!is.na(coverage)) %>% 
+  summarize(
+    over_estimate = sum(coverage > 1),
+    severe_over_estimate = sum(coverage > 1.6),
+    total = n(),
+    max_ratio = max(coverage),
+    median_ratio = median(coverage),
+    third_quantile = quantile(coverage, 0.75)
+  )
+```
+
+----
+
+## 3.2. Age and pathogen distribution
+```{r}
+# --- Calculate age of vaccination (in months) grouped by pathogen
+vacage <- pathogen %>% 
+  inner_join(
+    personal_info,
+    by = join_by("pid")
+  ) %>% 
+  select(pid, pathogen, vacdate, dob) %>% 
+  mutate(
+    vacc_age = arrow_weeks_between(dob, vacdate),
+    vacc_age = ifelse(vacc_age < 0, 0, vacc_age),
+    vacc_age = round(vacc_age/(4.3), digits = 0),
+    .keep = "unused"
+  ) %>% 
+  group_by(pathogen) %>% 
+  count(vacc_age) %>% 
+  collect()
+
+```
+
+```{r}
+eng_label <- setNames(
+  c("Tuberculosis", "Hepatitis B", "Diphtheria", "Pertussis", "Tetanus", "H. influenzae", "Polio", "Measles", "Rubella", "JEV"),
+  c("bcg", "hepb", "dip", "pt", "tt", "hib", "ipv", "mea", "rub", "jev")
+  )
+
+viet_label <- setNames(
+  c("Lao", "Viêm gan B", "Bạch hầu", "Ho gà", "Uốn ván", "Hib", "Bại liệt", "Sởi", "Rubella", "VNNB"),
+  c("bcg", "hepb", "dip", "pt", "tt", "hib", "ipv", "mea", "rub", "jev")
+  )
+
+
+vacage_plot <- vacage %>% 
+  filter(
+    pathogen %in% c("bcg", "hepb", "dip", "pt", "tt", "hib", "ipv", "mea", "rub", "jev"),
+    vacc_age <= 50
+    ) %>% 
+  mutate(
+    pathogen = eng_label[pathogen]
+  ) %>% 
+  ggplot(mapping = aes(x = vacc_age, y = n)) +
+  geom_bar(stat = "identity", fill = "#89dff0") + 
+  facet_wrap(~pathogen, scales = "free") +
+  labs(title = "Age of vaccination", x = "Age of vaccination (in months)", y = "Count")
+
+vacage_plot 
+# --- save plot as PNG
+ggsave(file = "vacage_epi.png", width = 14, height = 8)
+```
+
+---
+## 3.3. Data density across time
+```{r}
+vacname %>% 
+  filter(
+    vacdate >= dmy("01-01-2014") & vacdate <= dmy("01-01-2023")
+  ) %>% 
+  collect() %>% 
+  ggplot(
+    aes(x=vacdate, colour=factor(vactype))
+  ) +
+  labs(color = "vaccination_type") +
+  scale_x_date() +
+  geom_histogram(stat="density") +
+  facet_wrap(~province_reg)
+
+ggsave(file = "vac_density.png", width = 14, height = 8)
+```
+
+
+

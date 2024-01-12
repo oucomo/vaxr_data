@@ -1,0 +1,158 @@
+{
+    "unique_id_column_name": "pid",
+    "link_type": "dedupe_only",
+    "blocking_rules_to_generate_predictions": [
+        {
+            "blocking_rule": "l.`block` = r.`block`",
+            "sql_dialect": "spark"
+        }
+    ],
+    "max_iterations": 250,
+    "retain_matching_columns": true,
+    "retain_intermediate_calculation_columns": true,
+    "comparisons": [
+        {
+            "output_column_name": "name",
+            "comparison_levels": [
+                {
+                    "sql_condition": "name_l  = caregiver_l OR name_r = caregiver_r",
+                    "label_for_charts": "Null",
+                    "is_null_level": true
+                },
+                {
+                    "sql_condition": "name_l = name_r",
+                    "label_for_charts": "Exact match",
+                    "m_probability": 0.05512854683545312,
+                    "u_probability": 4.1009938074993504e-05
+                },
+                {
+                    "sql_condition": "jaro_winkler(name_l, name_r) >= 0.9",
+                    "label_for_charts": "Jaro Winkler similarity >= to 0.9",
+                    "m_probability": 0.1190456341093608,
+                    "u_probability": 0.0024742662638579417
+                },
+                {
+                    "sql_condition": "jaro_winkler(name_l, name_r) >= 0.8",
+                    "label_for_charts": "Jaro Winkler similarity >= 0.8",
+                    "m_probability": 0.2018817500339764,
+                    "u_probability": 0.054666247453966345
+                },
+                {
+                    "sql_condition": "damerau_levenshtein(name_l, name_r) <= 3",
+                    "label_for_charts": "Damerau Levenshtein distance <= 3",
+                    "m_probability": 0.0014479679882142943,
+                    "u_probability": 4.1009938074993504e-05
+                },
+                {
+                    "sql_condition": "damerau_levenshtein(name_l, name_r) <= 5",
+                    "label_for_charts": "Damerau Levenshtein distance <= 5",
+                    "m_probability": 0.026902449355565634,
+                    "u_probability": 0.000888548658291526
+                },
+                {
+                    "sql_condition": "ELSE",
+                    "label_for_charts": "All other comparisons",
+                    "m_probability": 0.5955936516774298,
+                    "u_probability": 0.9418889177477342
+                }
+            ],
+            "comparison_description": "Name comparison"
+        },
+        {
+            "output_column_name": "caregiver",
+            "comparison_levels": [
+                {
+                    "sql_condition": "`caregiver_l` IS NULL OR `caregiver_r` IS NULL",
+                    "label_for_charts": "Null",
+                    "is_null_level": true
+                },
+                {
+                    "sql_condition": "`caregiver_l` = `caregiver_r`",
+                    "label_for_charts": "Exact match caregiver",
+                    "m_probability": 0.0026333268873315573,
+                    "u_probability": 0.00014888152752447241
+                },
+                {
+                    "sql_condition": "damerau_levenshtein(`caregiver_l`, `caregiver_r`) <= 3",
+                    "label_for_charts": "Damerau_levenshtein <= 3",
+                    "m_probability": 0.01274069755562989,
+                    "u_probability": 0.006178583392265605
+                },
+                {
+                    "sql_condition": "damerau_levenshtein(`caregiver_l`, `caregiver_r`) <= 5",
+                    "label_for_charts": "Damerau_levenshtein <= 5",
+                    "m_probability": 0.02807959931978663,
+                    "u_probability": 0.018734258880162776
+                },
+                {
+                    "sql_condition": "jaro_winkler(`caregiver_l`, `caregiver_r`) >= 0.9",
+                    "label_for_charts": "Jaro_winkler >= 0.9",
+                    "m_probability": 0.0068734414369431346,
+                    "u_probability": 0.004937903996228335
+                },
+                {
+                    "sql_condition": "jaro_winkler(`caregiver_l`, `caregiver_r`) >= 0.8",
+                    "label_for_charts": "Jaro_winkler >= 0.8",
+                    "m_probability": 0.050786652127629464,
+                    "u_probability": 0.043647101152591156
+                },
+                {
+                    "sql_condition": "ELSE",
+                    "label_for_charts": "All other comparisons",
+                    "m_probability": 0.8988862826726793,
+                    "u_probability": 0.9263532710512277
+                }
+            ],
+            "comparison_description": "Exact match vs. Caregiver within levenshtein thresholds 3, 5 vs. Caregiver within damerau-levenshtein thresholds 3, 5 vs. Caregiver within jaro_winkler thresholds 0.9, 0.8 vs. anything else"
+        },
+        {
+            "output_column_name": "fup",
+            "comparison_levels": [
+                {
+                    "sql_condition": "`fup_l` IS NULL OR `fup_r` IS NULL",
+                    "label_for_charts": "Null",
+                    "is_null_level": true
+                },
+                {
+                    "sql_condition": "`fup_l` = `fup_r`",
+                    "label_for_charts": "Exact match",
+                    "m_probability": 0.8142352033224152,
+                    "u_probability": 0.8531035595091873
+                },
+                {
+                    "sql_condition": "ELSE",
+                    "label_for_charts": "All other comparisons",
+                    "m_probability": 0.18576479667758494,
+                    "u_probability": 0.14689644049081277
+                }
+            ],
+            "comparison_description": "Exact match vs. anything else"
+        },
+        {
+            "output_column_name": "vacdate",
+            "comparison_levels": [
+                {
+                    "sql_condition": "`vacdate_l` IS NULL OR `vacdate_r` IS NULL",
+                    "label_for_charts": "Null",
+                    "is_null_level": true
+                },
+                {
+                    "sql_condition": "`vacdate_l` = `vacdate_r`",
+                    "label_for_charts": "Exact match",
+                    "m_probability": 0.010089370885852067,
+                    "u_probability": 0.0010421706926713068
+                },
+                {
+                    "sql_condition": "ELSE",
+                    "label_for_charts": "All other comparisons",
+                    "m_probability": 0.9899106291141478,
+                    "u_probability": 0.9989578293073287
+                }
+            ],
+            "comparison_description": "Exact match vs. anything else"
+        }
+    ],
+    "sql_dialect": "spark",
+    "linker_uid": "mo5w1wff",
+    "probability_two_random_records_match": 0.0001
+}

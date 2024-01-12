@@ -1,0 +1,204 @@
+---
+title: "Clean messy data, prepare data for duplicate detection"
+output:
+  html_document:
+    df_print: paged
+---
+## 1. Load preprocessed data
+```{r}
+library(arrow)
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "preprocessed") 
+
+preprocessed_data <- open_dataset(data_path)
+```
+
+
+## 2. Cleaning process
+
+### Merge info from tetanus_mom to tetanus_status 
+Set tetanus status to TRUE if tetanus_mom >= 5 (by definition) otherwise, keep old value
+```{r merge tetanus_mom to tetanus_status}
+# Merge info from tetanus_mom to tetanus_status using ifelse then drop tetanus_mom
+preprocessed_data <- preprocessed_data %>% 
+  mutate(
+    tetanus_status = ifelse(is.na(tetanus_mom),
+                            tetanus_status, 
+                            ifelse(tetanus_mom >=5, TRUE, tetanus_status))
+    ) %>% 
+  compute()
+
+preprocessed_data <- preprocessed_data %>% select(-tetanus_mom) %>% compute()
+preprocessed_data
+```
+
+
+### Extract additional information from annotations in name
+Extract additional info from annotations in name
+- duplicated - denoted as trùng in name
+- suspended - denoted as mã huỷ/ bỏ in name
+- passed_away - denoted as chết/ tử vong in name 
+
+```{r extract additional info for duplicates detection}
+preprocessed_data <- preprocessed_data %>% 
+  mutate(
+    duplicated = str_detect(name, fixed("trùng", ignore_case = TRUE)),
+    suspended = str_detect(name, regex("(mã huỷ|bỏ)", ignore_case = TRUE)),
+    passed_away = str_detect(name, regex("(chết|tử vong)", ignore_case = TRUE))
+  ) %>% 
+  compute()
+
+# TODO merge suspended and passed away with fup using ifelse
+preprocessed_data <- preprocessed_data %>% 
+  mutate(
+    fup = ifelse(is.na(suspended), # only update fup when suspended is not NA
+                  fup, 
+                  ifelse(suspended, FALSE, fup)) #passed_away=TRUE -> fup=FALSE
+  ) %>% 
+  mutate(
+    fup = ifelse(is.na(passed_away), # only update fup when suspended is not NA
+                  fup, 
+                  ifelse(passed_away, FALSE, fup)) #passed_away=TRUE -> fup=FALSE
+  ) %>% 
+  select(-passed_away, -suspended) %>% 
+  compute()
+preprocessed_data
+```
+
+### Standardize ethnic names to match that of the GSO
+```{r Standardize ethnic names}
+preprocessed_data <- preprocessed_data %>% 
+  mutate(
+    ethnic = str_replace(ethnic, "Ta-ôi", "Tà-ôi")
+  ) %>% 
+  mutate(
+    ethnic = str_replace(ethnic, "Cơ Lao", "Co Lao")
+  ) %>% 
+  mutate(
+    ethnic = str_replace(ethnic, "Khơ mer", "Khơ-me")
+  ) %>% 
+   mutate(
+    ethnic = str_replace(ethnic, "La Chi", "La Chí")
+  ) %>% 
+  compute()
+
+# Sanity check
+preprocessed_data %>% select(ethnic) %>% distinct() %>% collect()
+```
+
+### Standardize names
+Standardize names
+```{r standardize names}
+standardized_name <- preprocessed_data %>% 
+  mutate(
+    # remove {} and () from name
+    name = stringr::str_remove_all(name, stringr::regex("(\\(.*\\)|\\{.*\\})"))
+  )  %>% 
+  mutate(
+    # remove prefix 
+    name = stringr::str_remove_all(name, stringr::regex("^ *(M|E) *[[:punct:]]", ignore_case = TRUE))
+  ) %>% 
+  mutate(
+    # remove weird and redundant prefix
+    name = stringr::str_remove_all(name, stringr::regex("^ *(ME|Em|CB|Cb|Ps|BÉ TRAI|BÉ GÁI|CON BÀ|B\\/O|C\\/B|mẹ|GIRL OF|BABY GIRL OF) *[[:punct:]]* *", ignore_case = TRUE))
+  ) %>% 
+  mutate( # remove weird punctuation at start of the name
+    name = str_remove_all(name, "^ *[[:punct:]] *")
+  ) %>%
+  mutate( # remove any weird and redundant annotation at the end of the name
+    name = str_replace(name, "(\\*|\\/|\\*-|\\()+[[:alpha:]]*$", "")
+  ) %>%
+  mutate( # remove all the remaining special characters in the name
+    name = str_remove_all(name, "[[:punct:]]+")
+  ) %>% 
+  mutate( # remove all digit
+    name = str_remove_all(name, "[[:digit:]]")
+  ) %>%
+  mutate( # remove some common weird annotations
+    name = str_remove_all(name, regex("(Xin cập nhật|Q bị số|Não bc).*", ignore_case = TRUE))
+  ) %>% 
+  compute()
+
+# trim extra whitespace
+standardized_name <- standardized_name %>% 
+  mutate(
+    name = str_trim(name)
+  ) %>% compute()
+```
+- About 1,373 pids where child's name is missing
+
+```{r standardize caregiver names}
+standardized_name <- standardized_name %>% 
+  mutate(
+    # remove prefix 
+    caregiver = stringr::str_remove_all(caregiver, stringr::regex("^ *(M)( |[[:punct:]]) *", ignore_case = TRUE))
+  ) %>% 
+  mutate(
+    # remove weird and redundant prefix
+    caregiver = stringr::str_remove_all(caregiver, stringr::regex("^ *(ME|Em|CB|Cb|Ps|BÉ TRAI|BÉ GÁI|CON BÀ|B\\/O|C\\/B|mẹ|GIRL OF|BABY GIRL OF) *[[:punct:]]* *", ignore_case = TRUE))
+  ) %>% 
+  mutate(
+    #remove redundant annotations
+    caregiver = stringr::str_remove_all(caregiver, stringr::regex("(Họ_tên|Ho_Ten|Bố|Mẹ|Ông|Bà|Bà Ngoại|Bà Nội|Nội|Ngoại|Bác|Cha|Ba)", ignore_case = TRUE))
+  ) %>% 
+  mutate( # remove all digit
+    caregiver = str_remove_all(caregiver, "[[:digit:]]")
+  ) %>%
+  mutate( # remove all punctuations
+    caregiver = str_remove_all(caregiver, "[[:punct:]]")
+  ) %>%
+  mutate(
+    caregiver = str_trim(caregiver, side = "both") 
+  ) %>% 
+  compute()
+
+```
+
+```{r sanity check after processing names}
+# -- Post processing sanity check 
+# get pid and the names from the original data
+pid_names <- preprocessed_data %>% select(pid, name, caregiver) %>%distinct() %>%  compute()
+
+# save old pids and names for future reference
+write_parquet(pid_names, file.path("./original_names.parquet"))
+pid_names <- as_arrow_table(read_parquet("./original_names.parquet"))
+
+# view difference between processed data and original data 
+preprocessed_data %>% 
+  select(pid, name, caregiver) %>% 
+  dplyr::filter(caregiver == "", name == "") %>%
+  distinct() %>% 
+  left_join(pid_names, by=join_by(pid == pid)) %>% 
+  select(pid, caregiver.y,  name.y) %>%
+  arrange(pid) %>% 
+  distinct() %>%
+  collect()
+```
+
+
+```{r}
+# sample error data 
+pid_names %>% 
+  dplyr::filter(
+    pid == "819010720180337"
+  ) %>% collect()
+```
+
+
+```{r update preprocessed data after checking}
+preprocessed_data <- standardized_name
+preprocessed_data
+```
+About 118,259 records have empty name and caregiver after cleaning
+
+--- 
+### 3. Save preprocessed data 
+```{r save pre-processed data}
+save_path <- file.path("/.", "cluster_data", "vrdata", "raw") 
+write_dataset(
+  dataset = preprocessed_data,
+  path = file.path(save_path, "preprocessed"),
+  format = "parquet",
+  partitioning = list("province_reg2")
+)
+```
+

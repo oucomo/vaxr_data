@@ -1,0 +1,506 @@
+---
+title: "Train model to link pids referring to the same child"
+output:
+  html_document:
+    df_print: paged
+---
+
+## 1. Prepare packages and data
+```{r load package and read data}
+library(arrow)
+library(tidyverse)
+Sys.setenv(SPARK_HOME="/home/anhptq/spark/spark-3.3.0-bin-hadoop3")
+
+personal_info <- read_parquet(file.path("/./", "cluster_data", "vrdata", "standardized", "personal_info.parquet"), as_data_frame = FALSE)
+personal_info
+```
+## Deterministic linking
+Rule:
+ - same date of birth, ethnic, gender, name (case sensitive), caregiver (case sensitive)
+```{r}
+deterministic_linking <- personal_info %>% 
+  inner_join(
+    personal_info,
+    by = join_by(dob == dob, ethnic == ethnic, sex == sex, name == name, caregiver == caregiver)
+  ) %>% 
+  filter(
+    # remove entities linking to it selves
+    pid.x != pid.y,
+    # remove entity that have invalid names
+    str_length(name) >= 2,
+    # remove entity that have invalid names
+    str_length(caregiver) >= 2
+  ) %>% 
+  select(pid.x, pid.y) %>% 
+  rename(
+    pid_l = pid.x,
+    pid_r = pid.y
+  ) %>% compute()
+
+deterministic_linking
+```
+Can exclude 642,626 entities from further processing
+
+Get remaining candidates for further entity resolution
+```{r}
+candidates <- personal_info %>% 
+  filter(
+    # only get pids that was not linked using deterministic linking rule 
+    !(pid %in% deterministic_linking$pid_l),
+    # either name or caregiver is of valid length for linking
+    str_length(name) >= 2 | str_length(caregiver) >= 2
+  ) %>% compute()
+candidates
+```
+
+
+## 2. Grouping possible duplicated entities by blocking
+
+Try blocking based on 4 attributes: \
+- date of birth (dob).  
+- ethnic.  
+- gender.   
+- name initials. (e.g. Nguyễn Văn A --> initial = NVA)
+
+Only perform entity resolution on data where name or caregiver is valid.
+Definition for a valid name: name must have at least 2 characters.
+
+Only perform entity resolution on data where min vacdate and max vacdate are different. (Assumption: an entity cannot be given multiple pids on the same date)
+
+```{r blocking}
+# get blocks that are valid for further entity resolution step
+valid_blocks <- candidates %>% 
+  mutate(
+    initials = str_to_upper(str_replace_all(name, '\\b(\\pL)\\pL{2,}|.', '\\1')),
+    block = paste(dob, ethnic, sex, initials, sep="_")
+  ) %>% 
+  group_by(block) %>% 
+  summarize(
+    no_records = n(),
+    min_date = min(vacdate),
+    max_date = max(vacdate)
+  ) %>% 
+  # only keeps block that has more than 1 entities
+  filter(no_records > 1) %>% 
+  compute()
+
+valid_blocks 
+```
+- Number of blocks: 2075706
+- Largest block size: 162 records
+- Smallest block size: 2 records
+- Mean block size: 4 records
+
+
+### Dataset with candidates for entity resolution 
+```{r candidates for entity resolution}
+candidates <- candidates %>%  
+  mutate(
+    initials = str_replace_all(name, '\\b(\\pL)\\pL{2,}|.', '\\1'),
+    block = paste(dob, ethnic, sex, initials, sep="_")
+  ) %>% 
+  filter(block %in% valid_blocks$block) %>% 
+  compute()
+
+candidates
+```
+
+Initial dataset: 14,400,339 records
+Candidates for statistical entity resolution: 9,087,332 records
+
+### Calculate total number of pairs
+```{r total number of pairs for comparison}
+valid_blocks %>% 
+  mutate(
+    block_pairs = no_records*(no_records - 1)/2
+  ) %>% 
+  summarize(
+    total_pairs = sum(block_pairs)
+  ) %>% 
+  collect()
+```
+Number of candidate pairs: 37,595,832
+
+---
+
+## 3. Train model
+
+Features for classification across candidate pairs 
+- Only consider *name similarity* when name is not the same as caregiver name.  
+- Only consider *caregiver similarity* when caregiver name is a valid name (at least 2 characters). 
+
+Import required packages
+Set up spark backend
+```{python import packages and config spark}
+# import splink utilities
+import pyarrow as pa
+import pandas as pd
+import splink
+from splink.spark.linker import SparkLinker
+import splink.spark.comparison_library as cl
+import splink.spark.comparison_template_library as ctl
+from splink.spark.blocking_rule_library import block_on
+from splink.spark.jar_location import similarity_jar_location
+import altair_viewer
+import altair as alt
+# import spark utilities
+from pyspark.sql import SparkSession, types
+from pyspark.conf import SparkConf
+
+# define Hadoop home
+import os
+os.environ['HADOOP_HOME'] = '/./home/anhptq/spark/spark-3.3.0-bin-hadoop3'
+
+# specify path to jars for comparison functions
+path = '/./home/anhptq/miniconda3/envs/vaccine_reg/lib/python3.9/site-packages/splink/files/spark_jars/scala-udf-similarity-0.1.1_spark3.x.jar'
+
+spark_config = SparkConf()
+spark_config.setAppName("VaxrEntityResolution")
+spark_config.set("spark.jars", path)
+spark_config.set("spark.executor.memory", "80g")
+spark_config.set("spark.driver.memory", "20g")
+spark_config.set("spark.executor.core", "40")
+spark_config.set("spark.default.parallelism", "800")
+spark_config.set("spark.hadoop.home.dir", "$HADOOP_HOME")
+spark_config.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+spark_config.set("spark.eventLog.enabled", "true")
+spark_config.set("spark.eventLog.dir", "./spark_logs")
+spark_config.set("spark.sql.parquet.datetimeRebaseModeInWrite", "CORRECTED")
+
+# run in cluster mode, use pyspark
+# spark = SparkSession.builder.master("spark://172.18.0.4:7077").config(conf = spark_config).getOrCreate()
+# spark.sparkContext.setCheckpointDir("hdfs://192.168.100.102:9000")
+
+# run in local mode
+spark = SparkSession.builder.master("local[*]").config(conf = spark_config).getOrCreate()
+spark.sparkContext.setCheckpointDir("./tmp")
+
+# check spark version
+spark.version
+# making sure the path is registered
+spark.conf.get("spark.jars")
+spark.conf.get("spark.executor.memory")
+spark.conf.get("spark.driver.memory")
+
+```
+
+Define linking configurations
+```{python comparison configs}
+# --- Custom comparison logic for comparing names
+# only compare names when name != caregiver
+# in which case compare it the same way as comparing caregiver name
+name_comparison = {
+  "output_column_name": "name",
+  "comparison_description": "Name comparison",
+  "comparison_levels": [
+    {
+         # (when name == caregiver, treat name as missing)
+        "sql_condition": "name_l  = caregiver_l OR name_r = caregiver_r",
+        "label_for_charts": "Null",
+        "is_null_level": True,
+    },
+    {
+        "sql_condition": "name_l = name_r",
+        "label_for_charts": "Exact match",
+        "m_probability": 0.8,
+        "u_probability": 0.1,
+    },
+    {
+        "sql_condition": "jaro_winkler(name_l, name_r) >= 0.9",
+        "label_for_charts": "Jaro Winkler similarity >= to 0.9",
+    },
+    {
+        "sql_condition": "jaro_winkler(name_l, name_r) >= 0.8",
+        "label_for_charts": "Jaro Winkler similarity >= 0.8",
+    },
+    {
+        "sql_condition": "damerau_levenshtein(name_l, name_r) <= 3",
+        "label_for_charts": "Damerau Levenshtein distance <= 3",
+    },
+    {
+        "sql_condition": "damerau_levenshtein(name_l, name_r) <= 5",
+        "label_for_charts": "Damerau Levenshtein distance <= 5",
+    },
+    {"sql_condition": "ELSE", "label_for_charts": "All other comparisons"},
+  ]
+}
+
+# --- Settings for computing comparison vector
+settings = {
+  "unique_id_column_name": "pid",
+  "link_type":"dedupe_only", 
+  "blocking_rules_to_generate_predictions": [
+        block_on("block")
+  ],
+  "max_iterations":250,
+  "retain_matching_columns": True, 
+  "retain_intermediate_calculation_columns": True,
+  "comparisons": [
+      name_comparison,
+      ctl.name_comparison("caregiver", damerau_levenshtein_thresholds = [3, 5], m_probability_exact_match_name = 0.7),
+      # if fup is the same 
+      cl.exact_match("fup", m_probability_exact_match=0.01),
+      # only check whether vacdate is the same or not
+      # if vacdate is the same --> most likely not the same entity
+      cl.exact_match("vacdate", m_probability_exact_match=0.01)
+      # cl.exact_match("duplicated")
+  ]}
+  
+```
+
+Export data frame to spark
+```{python export data to spark}
+# convert data to pandas
+# subset_data = r.subset_data.to_pandas()
+candidates = r.candidates.to_pandas()
+
+# export dataframe to spark
+# subset_data = spark.createDataFrame(subset_data)
+# subset_data
+candidates = spark.createDataFrame(candidates)
+candidates
+```
+
+Try detection with default settings, built-in comparison rule
+
+```{python train model}
+# --- Set up linker
+# linker = SparkLinker([subset_data], settings)
+linker = SparkLinker([candidates], settings,  num_partitions_on_repartition=40)
+
+# --- Set up rule to estimate priors
+# deterministic rule to estimate prior
+deterministic_rule = [
+  "l.name = r.name or l.caregiver = r.caregiver",
+  "l.sex = r.sex and l.ethnic = r.ethnic and l.dob = r.dob"
+]
+# guess recall of deterministic linking to be 0.4
+linker.estimate_probability_two_random_records_match(deterministic_rule, recall = 0.4)
+# collect garbage in between steps
+spark.sparkContext._jvm.System.gc()
+
+# --- Set up training for u value
+linker.estimate_u_using_random_sampling(max_pairs=1e5)
+# collect garbage in between steps
+spark.sparkContext._jvm.System.gc()
+
+
+# --- Set up training blocking rule for m value
+training_block_rule = block_on(["dob", "ethnic", "sex", "initials"]) 
+linker.estimate_parameters_using_expectation_maximisation(training_block_rule)
+spark.sparkContext._jvm.System.gc()
+```
+Try predicting result
+```{python predict result with linker}
+results = linker.predict(threshold_match_probability=0.6)
+spark.sparkContext._jvm.System.gc()
+
+result_pd = results.as_pandas_dataframe()
+
+pd.set_option('display.max_columns', 20)
+# result_pd[["pid_l","pid_r", "name_l", "name_r", "caregiver_l", "caregiver_r", "fup_l", "fup_r"]]
+result_pd
+
+alt.renderers.enable("mimetype")
+```
+
+
+```{python visualize model}
+records_to_view = results.as_record_dict(limit=10)
+linker.waterfall_chart(records_to_view)
+
+# save as html as a work around (graph generated by Vegas package cannot be displayed in Rmd file)
+linker.m_u_parameters_chart().save("m_u_parameters.html")
+linker.parameter_estimate_comparisons_chart().save("parameter_estimate.html")
+
+# save model as a json 
+linker.save_model_to_json("./full_model.json")
+```
+
+
+--- 
+
+## 4. Predict using saved model 
+```{python try linking on full data}
+import time
+# load saved model 
+linker = SparkLinker([candidates])
+linker.load_model("./trained_models/full_model.json")
+
+# --- Compute run time for predicting
+# linker.predict(full_dataset)
+result = linker.predict(threshold_match_probability=0.6)
+
+start_time = time.time()
+result_pd = result.as_pandas_dataframe()
+end_time = time.time()
+print(f"Run time: {(end_time-start_time)/60} minutes")
+```
+
+
+### Analyze linking result
+
+```{r}
+library(reticulate)
+library(dplyr)
+
+py$result_pd
+# load data classified as match to R as arrow table for
+predicted_match <- as_arrow_table(py$result_pd[c("match_probability", "gamma_name", "gamma_caregiver",  "pid_l", "pid_r")])
+
+linked_pairs <- predicted_match %>% 
+  # --- perform join to get all variables for each entity
+  left_join(
+    personal_info, 
+    by = join_by(pid_l == pid)
+  ) %>% 
+  left_join(
+    personal_info,
+    by = join_by(pid_r == pid)
+  )  
+
+linked_pairs %>% 
+  filter(match_probability > 0.7) %>% 
+  arrange(match_probability) %>%
+  select(
+    match_probability,
+    starts_with("name"),
+    starts_with("caregiver"),
+    starts_with("vacdate"),
+  ) %>% 
+  collect()
+
+# linked_pairs <- linked_pairs %>% compute()
+# write_parquet(linked_pairs, "./linked_data/full_linked_pairs.parquet")
+```
+
+Note:
+- True match threshold: 0.7 \
+- Manual inspection threshold: 0.6
+
+--- 
+
+## 5. Manual inspection
+
+#### True match threshold
+match_probability greater than 0.7. 1,935 pairs classified as true match using this threshold \
+
+For the pairs with match probability in the range [0.6, 0.7], to reduce the number of pairs that require manual inspection, the following preprocessed steps are applied:
+- If fup of either entity in the pair is FALSE → classified as true match by default \
+- Amongst the pairs that have true_match == TRUE, manually inspect pairs with different caregiver initials and add to false_postive.csv file \
+- Amongst the pairs that have true_match == FALSE, inspect pairs with same caregiver initials to add to fase_negative.csv file \
+
+#### Manual inspection methodology
+Manual classification mostly based on the following features:
+- Overlapping vaccination schedule (same date, same vacname, same vacplace). 
+- Possibility of having different caregiver names due to typos
+- Pairs with the same province_reg, district_reg, commune_reg for each vaccination record are also more likely the same entities 
+
+#### Result 
+After manual inspection, the number of matched pairs from probabilistic linking decreased from 4,448 to 3,473.
+
+
+```{r load predicted pairs}
+linked_pairs <- read_parquet("./linked_data/full_linked_pairs.parquet", as_data_frame = FALSE)
+```
+
+
+```{r narrow down list of duplicates}
+possible_true_dups <- linked_pairs %>% 
+  mutate(
+    cg_initials.x = str_to_upper(str_replace_all(caregiver.x, '\\b(\\pL)\\pL{1,}|.', '\\1')),
+    cg_initials.y = str_to_upper(str_replace_all(caregiver.y, '\\b(\\pL)\\pL{1,}|.', '\\1'))
+  ) %>% 
+  filter(
+    # --- change filtering condition depending on check case
+    (match_probability <= 0.7 & cg_initials.x != cg_initials.y & (fup.x == TRUE & fup.y == TRUE)) 
+  ) %>% 
+  select(
+    pid_l, pid_r
+  ) %>% collect()
+
+# --- Further narrow down possible true match
+possible_true_match <- 0
+remaining_candidates <- data.frame(pid_l = character(), pid_r = character())
+for (row in 1:nrow(possible_true_dups)){
+  pids <- unlist(possible_true_dups[row,])
+  # calculate percentage of same shot
+  dups_analyze <- preprocessed %>%
+    filter(pid %in% pids) %>%
+    group_by(vacname, vacdate) %>%
+    count() %>%
+    ungroup() %>% 
+    summarize(
+      no_shots = n(),
+      dups = sum(ifelse(n < 2, 0, 1)),
+      non_dups = no_shots - dups, 
+      percentage_dups = dups/no_shots
+    ) %>% collect()
+
+  # if percentage of identical shots (same vacname, same vacdate) > 0.5 --> add as candidate for manual inspection
+  if (dups_analyze[1,"percentage_dups"][[1]] > 0.5){
+    possible_true_match <- possible_true_match + 1
+    remaining_candidates <- rbind(remaining_candidates, pids)
+  }
+}
+remaining_candidates <- remaining_candidates %>% rename(pid_l = X.103173320190142., pid_r = X.103173320190153.)
+remaining_candidates
+```
+
+
+```{r inspect vaccination records}
+# --- Manual inspect a pair of pids
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "preprocessed")
+preprocessed <- open_dataset(data_path)
+
+preprocessed %>% 
+  arrange(vacdate, vacname) %>% 
+  filter(pid %in% c("115152320210142","115152320210145")) %>% 
+  collect()
+```
+
+----
+## 6. Resolve false match from manual inspection
+
+```{r update result for probabilistic linking after manual inspection}
+# read table of pairs manually classified as false match
+false_pos <- read_csv("./manual_inspection/false_positive.csv", col_types = cols(pid_l = "c", pid_r = "c"))
+false_pos$true_match <- FALSE
+false_pos
+
+false_neg <- read_csv("./manual_inspection/false_negative.csv", col_types = cols(pid_l = "c", pid_r = "c"))
+false_neg$true_match <- TRUE
+false_neg
+
+updated_linked_pairs <- linked_pairs %>% 
+  mutate(
+    # if one of the record in the pair have fup == FALSE --> true match
+    true_match = fup.x == FALSE | fup.y == FALSE,
+    # if a pair have match probability>=0.7 --> set true_match to TRUE
+    true_match = ifelse(match_probability>0.7, TRUE, true_match)
+  ) %>% 
+  collect() %>% 
+  # update rows that are manually classified as false match
+  rows_update(false_pos, unmatched = "ignore", by = c("pid_l", "pid_r")) %>% 
+  rows_update(false_neg, unmatched = "ignore", by = c("pid_l", "pid_r")) %>% 
+  filter(true_match == TRUE) %>% 
+  select(-true_match)
+  
+updated_linked_pairs
+# write_parquet(updated_linked_pairs, "./post_inspection_linked_pairs/post_inspection_prob_link.parquet")
+```
+
+```{r update result for deterministic linking after manual inspection}
+deterministic_linking <- read_parquet("./linked_data/deterministic_linking_pairs.parquet")
+
+dem_false_pos <- read_csv("./manual_inspection/deterministic_false_pos.csv", col_types = cols(pid_l = "c", pid_r = "c"))
+
+deterministic_linking <- deterministic_linking %>% 
+  rows_delete(dem_false_pos, by = c("pid_l", "pid_r") )
+
+# write_parquet(deterministic_linking, "./post_inspection_linked_pairs/post_inspection_dem_link.parquet")
+```
+
+
+
+

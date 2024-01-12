@@ -1,0 +1,71 @@
+---
+title: "Visualize multivariate"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+## 1. Import libraries
+```{r}
+library(ArrowDQAToolkit)
+options(bitmapType='cairo')
+```
+
+
+## 2. Load data
+```{r}
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "parquet")
+raw_data <- open_dataset(data_path)
+```
+
+
+## 3. Visualize data
+
+### Age, vacname
+```{r age vs vaccine distribution}
+# ---- Create new R dataframe containing vaccine name and age (of vaccination)
+vacname_age <- raw_data %>% 
+  dplyr::filter(dob <= vacdate) %>% 
+  dplyr::filter(vacdate < dmy("01-01-2023")) %>% 
+  mutate(
+    week_age = arrow_weeks_between(dob, vacdate),
+    .keep="unused") %>%
+  select(pid, vacname, week_age) %>% 
+  collect()
+
+# TODO plot age distribution for each type of vaccine 
+# vacname_age %>% 
+# ggplot(
+#   aes(week_age, group=vacname)) +
+#   geom_histogram() +
+#   facet_wrap(vars(vacname)) + 
+#   ggtitle("Age distribution") 
+```
+
+### Vacdate, vactype
+```{r vacdate vactype by region}
+vactype_by_region <- raw_data %>% 
+  select(vactype, dob, vacdate, province_reg) %>% 
+  dplyr::filter(dob <= vacdate) %>% 
+  dplyr::filter(vacdate < dmy("01-01-2023")) %>% 
+  collect() %>% 
+  ggplot(
+    aes(x=vacdate, colour=factor(vactype))
+  ) +
+  labs(color = "vaccination_type") +
+  scale_x_date() +
+  geom_histogram(stat="density") +
+  facet_wrap(~province_reg)
+
+vactype_by_region <- vactype_by_region + 
+  theme(text = element_text(size = 8), 
+        axis.text.x = element_text(size = 6),
+        legend.position = "bottom")
+
+vactype_by_region 
+```
+
+
+
+

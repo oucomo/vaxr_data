@@ -1,0 +1,167 @@
+---
+title: "Data Quality Assessment - Intrinsic Quality"
+output:
+  html_document:
+    df_print: paged
+---
+
+## 1. Import relevant libraries
+
+```{r}
+library(ArrowDQAToolkit)
+```
+
+----
+
+## 2. Load raw data
+```{r}
+data_path <- file.path("/.", "cluster_data", "vrdata", "raw", "parquet")
+raw_data <- as_arrow_table(open_dataset(data_path))
+```
+
+
+----
+
+## 3. Run Intrinsic quality assessment using package
+
+### 3.1. Prepare metadata
+```{r load metadata}
+metadata_path <- file.path("/.", "cluster_data", "vrdata", "raw")
+item_metadata <- prep_item_metadata(path = metadata_path)
+crossitem_metadata <- prep_crossitem_metadata(path = metadata_path)
+```
+
+---- 
+
+### 3.2. Assess Integrity
+#### Datatype
+```{r integrity - datatype}
+raw_data <- int_datatype(raw_data, item_metadata)
+gc()
+```
+
+
+#### Duplicates
+```{r integrity - duplicates}
+duplicate_result <- int_duplicates(raw_data, check_all = FALSE, cross_item_metadata = crossitem_metadata)
+
+duplicate_result$result
+# get vector indicating whether a row is a duplicate
+duplicate_result$duplicates$vaccine_administration
+
+gc()
+```
+
+---
+
+### 3.3. Assess Consistency
+#### Values within specified range
+```{r consistency - values within specified range}
+con_range(raw_data, item_metadata)
+```
+
+#### Valid labels
+```{r consistency - valid labels}
+con_label(raw_data, metadata = item_metadata, path = metadata_path)
+gc()
+```
+
+#### Value contradiction
+```{r consistency - value contradiction}
+contradiction_result <- con_contradiction(raw_data, metadata=crossitem_metadata)
+# summary on assessment result
+contradiction_result$result
+
+# further analysis on contradictory data records
+contradiction_result$contradicted_data %>%
+  select(province_reg, vacplace, vacname, dob, vacdate) %>% 
+  collect()
+```
+
+--- 
+
+### 3.4. Assess Completeness
+#### Crude Missing
+```{r completeness - crude missing}
+com_crude_missing(raw_data, item_metadata = item_metadata, cross_item_metadata = crossitem_metadata)
+```
+
+### 3.5. Assess Accuracy
+#### Univariate outlier
+```{r accuracy - univariate outlier}
+accurary_result <- acc_uni_outliers(raw_data, item_metadata)
+
+accurary_result$result
+
+# view outliers of vacdate
+accurary_result$outliers[["vacdate"]] %>% 
+  mutate(dob = cast(dob, arrow::date32())) %>% 
+  collect()
+
+# view outliers of vacorder
+accurary_result$outliers[["vacorder"]] %>% 
+  arrange(desc(vacorder)) %>% 
+  collect()
+
+# view outliers of tetanus_mom
+accurary_result$outliers[["tetanus_mom"]] %>% 
+  arrange(desc(tetanus_mom)) %>% 
+  collect()
+```
+
+
+## 4. Initial cleaning
+### Drop columns
+Remove redundant columns
+```{r remove redundant columns}
+raw_data <- raw_data %>% 
+  select(-rn, -vacplace0, -vacorder, -place_update) %>%
+  compute()
+gc()
+```
+
+### Remove duplicates
+Remove rows with duplicated [pid, vacdate, vacname]
+```{r remove duplicates}
+duplicated_row <- as_arrow_array(duplicate_result$duplicates$vaccine_administration)
+raw_data$duplicated_row <- duplicate_result$duplicates$vaccine_administration
+
+filtered_data <- raw_data %>% 
+  dplyr::filter(duplicated_row == FALSE) 
+# filtered_data <- filtered_data %>% compute()
+
+# Resolve crash while filtering data
+# - considering save data (with duplicated_row column), flush RAM, load minimal data then do filtering 
+save_path <- file.path("/.", "cluster_data", "vrdata", "raw") 
+write_dataset(
+  dataset = raw_data,
+  path = file.path(save_path, "preprocessed"),
+  format = "parquet",
+  partitioning = list("province_reg2")
+)
+
+# Load minimal data then do filtering
+file_path <- file.path("/.", "cluster_data", "vrdata", "raw", "preprocessed") 
+raw_data <- open_dataset(file_path)
+
+# filter out duplicated rows 
+# then run write dataset code again
+raw_data <- raw_data %>% 
+  dplyr::filter(
+    duplicated_row == FALSE
+  ) %>% 
+  select(-duplicated_row) %>% compute()
+
+```
+
+### After processing
+preprocessed folder was created in /./cluster_data/vrdata/raw/preprocessed containing:
+- 153,183,415 rows (after removing rows with duplicated pid, vacname, vacdate)
+- 23 columns (after removing rn, vacplace0, vacorder)
+
+
+
+
+
+
+
