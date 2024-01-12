@@ -18,10 +18,13 @@ Contains source code for the data cleaning process
 --- 
 
 ### Folders
-**linked_data** - datasets of linked pids\
+**linked_data** - datasets of linked pids pre-inspection\
  ┣ **deterministic_linking_pairs.parquet** - pid pairs linked using deterministic rule \
- ┣ **full_linked_pairs.parquet** - pid pairs linked using model\
- ┗ **post_inspection_linked_pairs.parquet** - linked pairs after manual inspection
+ ┗ **full_linked_pairs.parquet** - pid pairs linked using model\
+
+**post_inspection_linked_pairs** - linked pairs after manual inspection \
+┣ **post_inspection_dem_link.parquet** - deterministic linked pairs after manual inspection \
+┗ **post_inspection_prob_link.parquet** - probabilistic linked pairs after manual inspection
  
  **model_visualization**\
  ┣ **m_u_parameters.html** - graphical representation of m and u values of each agreement level for each variable\
